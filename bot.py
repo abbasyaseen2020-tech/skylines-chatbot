@@ -397,14 +397,17 @@ def handle_comment(comment_data):
     if verb != "add":
         return
 
-    # التحقق من الكلمات المفتاحية
-    if any(keyword in comment_text for keyword in COMMENT_KEYWORDS):
-        # رد عام على التعليق
-        public_reply = f"أهلاً {sender_name}! 👋 بعتنالك رسالة خاصة بكل التفاصيل. تابع الماسنجر!"
+    # الرد على كل التعليقات باحترافية
+    if any(word in comment_text for word in ["ممتاز", "جميل", "حلو", "رائع", "شكراً", "شكرا", "❤", "👍"]):
+        # رد على تعليقات الشكر والإعجاب
+        reply_to_comment(comment_id, f"شكراً ليك {sender_name}! نورتنا 🙏")
+    else:
+        # رد احترافي عام على أي تعليق + رسالة خاصة بالتفاصيل
+        public_reply = f"أهلاً {sender_name}! تم الرد عليك بالرسائل الخاصة بكل التفاصيل 💬 تابع الماسنجر!"
         reply_to_comment(comment_id, public_reply)
 
         # رد خاص ذكي عبر الماسنجر
-        private_context = f"العميل {sender_name} علّق على بوست وقال: \"{comment_text}\". رد عليه برسالة ترحيبية وأجب على سؤاله."
+        private_context = f"العميل {sender_name} علّق على بوست وقال: \"{comment_text}\". رد عليه برسالة ترحيبية وساعده."
         ai_response = ask_ai(
             f"comment_{comment_id}",
             private_context,
@@ -412,9 +415,6 @@ def handle_comment(comment_data):
         )
         send_private_reply(comment_id, ai_response)
         logger.info(f"AI responded to comment from {sender_name}: {comment_text[:50]}")
-
-    elif any(word in comment_text for word in ["ممتاز", "جميل", "حلو", "رائع", "شكراً", "شكرا", "❤", "👍"]):
-        reply_to_comment(comment_id, f"شكراً ليك {sender_name}! نورتنا 🙏")
 
 
 # ============================================
