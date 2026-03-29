@@ -22,10 +22,10 @@ import requests
 from datetime import datetime
 from collections import defaultdict
 from flask import Flask, request, jsonify
-
 # ============================================
 # CONFIGURATION
 # ============================================
+
 app = Flask(__name__)
 logging.basicConfig(
     level=logging.INFO,
@@ -39,19 +39,20 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-20250514")
+AI_MODEL = os.getenv("AI_MODEL", "claude-3-5-sonnet-20241022")
+
 GRAPH_API_URL = "https://graph.facebook.com/v19.0"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
-# Import knowledge baseh
+# Import knowledge base
 from knowledge_base import (
-    get_system_prompt, COMMENT_KEYWORDS, COMPANY_INFO,
-    format_projects_for_search
+    get_system_prompt, COMMENT_KEYWORDS, COMPANY_INFO,    format_projects_for_search
 )
 
 # ============================================
 # DATA STORES
 # ============================================
+
 leads_db = []  # In production, use a real database
 conversation_history = defaultdict(list)  # user_id -> list of messages
 user_data = {}  # user_id -> collected data (name, phone, etc.)
@@ -61,6 +62,50 @@ MAX_HISTORY = 20  # Max messages to keep per conversation
 # ============================================
 # AI AGENT - CORE INTELLIGENCE
 # ============================================
+
+def sanitize_history(history):
+    """
+    تنظيف تاريخ المحادثة لضمان تناوب صحيح بين user و assistant.
+    Claude API يتطلب أن تبدأ الرسائل بـ user وتتناوب بين user و assistant.
+    """
+    if not history:
+        return []
+    sanitized = []
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content", "").strip()
+
+        if not content:
+            continue
+
+        if not sanitized:
+            # أول رسالة لازم تكون user
+            if role == "user":
+                sanitized.append(msg)
+            # لو أول رسالة assistant، تجاهلها
+            continue
+
+        last_role = sanitized[-1]["role"]
+
+        if role == last_role:
+            # لو نفس الدور متكرر، ادمج المحتوى
+            if role == "user":
+                sanitized[-1] = {
+                    "role": "user",
+                    "content": sanitized[-1]["content"] + "\n" + content
+                }
+            else:                # لو assistant متكرر، استبدل بالأحدث
+                sanitized[-1] = msg
+        else:
+            sanitized.append(msg)
+
+    # لازم آخر رسالة تكون user (لأن Claude يرد على آخر رسالة user)
+    if sanitized and sanitized[-1]["role"] != "user":
+        sanitized.pop()
+
+    return sanitized
+
+
 def ask_ai(user_id, user_message, platform="messenger"):
     """
     إرسال رسالة العميل إلى Claude API والحصول على رد ذكي
@@ -73,12 +118,17 @@ def ask_ai(user_id, user_message, platform="messenger"):
     # إضافة رسالة العميل للتاريخ
     conversation_history[user_id].append({
         "role": "user",
-        "content": user_message
-    })
+        "content": user_message    })
 
     # الاحتفاظ بآخر MAX_HISTORY رسالة فقط
     if len(conversation_history[user_id]) > MAX_HISTORY:
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY:]
+
+    # تنظيف التاريخ لضمان تناوب صحيح
+    clean_history = sanitize_history(conversation_history[user_id])
+
+    if not clean_history:
+        clean_history = [{"role": "user", "content": user_message}]
 
     # تجهيز context إضافي عن العميل
     user_context = ""
@@ -92,8 +142,7 @@ def ask_ai(user_id, user_message, platform="messenger"):
                 user_context += f"، مهتم بـ: {data['interest']}"
             user_context += "]"
 
-    system_prompt = get_system_prompt()
-    if user_context:
+    system_prompt = get_system_prompt()    if user_context:
         system_prompt += f"\n\n## معلومات العميل الحالي:{user_context}"
 
     system_prompt += f"\n\n## المنصة الحالية: {platform}"
@@ -111,16 +160,17 @@ def ask_ai(user_id, user_message, platform="messenger"):
         "model": AI_MODEL,
         "max_tokens": 500,
         "system": system_prompt,
-        "messages": conversation_history[user_id],
+        "messages": clean_history,
     }
 
     try:
         response = requests.post(
-            ANTHROPIC_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=30
+            ANTHROPIC_API_URL, headers=headers, json=payload, timeout=30
         )
+        # تسجيل تفاصيل الخطأ قبل raise_for_status
+        if response.status_code != 200:
+            logger.error(f"Claude API HTTP {response.status_code}: {response.text[:500]}")
+
         response.raise_for_status()
         result = response.json()
         ai_response = result["content"][0]["text"]
@@ -139,17 +189,32 @@ def ask_ai(user_id, user_message, platform="messenger"):
 
     except requests.exceptions.Timeout:
         logger.error("Claude API timeout")
-        return "عذراً، حصل تأخير بسيط. ممكن تبعت رسالتك تاني؟ 🙏"
+        fb_response = "عذراً، حصل تأخير بسيط. ممكن تبعت رسالتك تاني؟ 🙏"
+        # إضافة رد الـ fallback للتاريخ لمنع تكرار دور user        conversation_history[user_id].append({
+            "role": "assistant",
+            "content": fb_response
+        })
+        return fb_response
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Claude API error: {e}")
-        # Fallback إلى الردود الأساسية
-        return fallback_response(user_message)
+        fb_response = fallback_response(user_message)
+        # إضافة رد الـ fallback للتاريخ لمنع تكرار دور user
+        conversation_history[user_id].append({
+            "role": "assistant",
+            "content": fb_response
+        })
+        return fb_response
 
     except (KeyError, IndexError) as e:
         logger.error(f"Unexpected API response format: {e}")
-        return fallback_response(user_message)
-
+        fb_response = fallback_response(user_message)
+        # إضافة رد الـ fallback للتاريخ لمنع تكرار دور user
+        conversation_history[user_id].append({
+            "role": "assistant",
+            "content": fb_response
+        })
+        return fb_response
 
 def extract_user_data(user_id, user_message, ai_response):
     """
@@ -173,8 +238,7 @@ def extract_user_data(user_id, user_message, ai_response):
     history = conversation_history.get(user_id, [])
     if len(history) >= 2:
         prev_msg = history[-2].get("content", "") if history[-2]["role"] == "assistant" else ""
-        if any(word in prev_msg for word in ["اسمك", "اسم حضرتك", "نعرف اسمك"]):
-            # الرسالة الحالية ممكن تكون الاسم
+        if any(word in prev_msg for word in ["اسمك", "اسم حضرتك", "نعرف اسمك"]):            # الرسالة الحالية ممكن تكون الاسم
             if len(text.split()) <= 4 and not text.startswith("0"):
                 user_data[user_id]["name"] = text
 
@@ -197,9 +261,8 @@ def extract_phone(text):
     import re
     # أنماط أرقام التليفون المصرية
     patterns = [
-        r'01[0-9]{9}',           # 01XXXXXXXXX
-        r'\+201[0-9]{9}',        # +201XXXXXXXXX
-        r'201[0-9]{9}',          # 201XXXXXXXXX
+        r'01[0-9]{9}',               # 01XXXXXXXXX
+        r'\+201[0-9]{9}',            # +201XXXXXXXXX        r'201[0-9]{9}',              # 201XXXXXXXXX
         r'01[0-9]-[0-9]{4}-[0-9]{4}',  # 01X-XXXX-XXXX
         r'01[0-9] [0-9]{4} [0-9]{4}',  # 01X XXXX XXXX
     ]
@@ -223,80 +286,71 @@ def auto_save_lead(user_id):
                 "phone": data["phone"],
                 "interest": data.get("interest", "غير محدد"),
                 "platform": "auto",
-                "timestamp": datetime.now().isoformat(),
-                "user_id": user_id,
+                "timestamp": datetime.now().isoformat(),                "user_id": user_id,
             }
             save_lead(lead)
             logger.info(f"Auto-saved lead: {data['name']} - {data['phone']}")
+
 
 def fallback_response(message):
     """
     ردود احتياطية في حالة عدم توفر AI API
     تستخدم نظام كلمات مفتاحية بسيط
+    أسيل هي اسم المساعدة
     """
     text = message.lower().strip()
 
     # تحية
     if any(w in text for w in ["سلام", "هاي", "مرحبا", "صباح", "مساء", "اهلا", "أهلا", "هلو"]):
         return (
-            "أهلاً بيك في سكاي لاينز للعقارات! 🏢\n"
-            "أنا المساعد الذكي وهساعدك تلاقي عقار أحلامك.\n"
-            "إيه اللي تحب تعرفه؟\n"
-            "1️⃣ المشاريع المتاحة\n"
-            "2️⃣ الأسعار وأنظمة الدفع\n"
-            "3️⃣ حجز موعد زيارة\n"
-            "4️⃣ التحدث مع مستشار"
+            "أهلاً بحضرتك! أنا أسيل من Sky Lines Group 😊\n"
+            "يسعدني أساعدك تلاقي الوحدة المناسبة ليك.\n"
+            "حضرتك بتدور على سكن ولا استثمار؟"
         )
 
     # أسعار وتقسيط
     if any(w in text for w in ["سعر", "كام", "تقسيط", "مقدم", "دفع", "قسط"]):
-        return (
-            "أنظمة السداد عندنا مرنة جداً:\n"
-            "• مقدم يبدأ من 10% فقط\n"
-            "• تقسيط حتى 10 سنوات بدون فوائد\n"
-            "• خصم كاش حتى 15%\n\n"
-            "تحب أعرفك أسعار مشروع معين؟ أو أحسبلك القسط الشهري؟ 💰"
+        return (            "أنظمة السداد في مشروع Sky Villas M7 مرنة جداً:\n"
+            "• السكني: مقدم 30% وتقسيط حتى يوليو 2027\n"
+            "• التجاري: مقدم يبدأ من 10% فقط!\n"
+            "• خصم 100,000 ج عند سداد 50%\n\n"
+            "حضرتك مهتم بوحدة سكنية ولا تجارية ولا إدارية؟"
         )
 
     # مشاريع
     if any(w in text for w in ["مشاريع", "شقة", "شقق", "فيلا", "فيلات", "محل", "مكتب"]):
         return (
-            "عندنا مشاريع متنوعة في:\n"
-            "🏠 بني سويف - القاهرة الجديدة - العاصمة الإدارية\n"
-            "🏠 6 أكتوبر - الساحل الشمالي\n\n"
-            "شقق وفيلات ومحلات ومكاتب.\n"
-            "مهتم بأنهي نوع ومنطقة؟"
+            "مشروعنا الرئيسي Sky Villas M7 في شرق النيل - بني سويف 🏢\n"
+            "يضم وحدات سكنية وتجارية وإدارية بتصميم كلاسيكي أوروبي فاخر.\n"
+            "حضرتك مهتم بأنهي نوع وحدة؟"
         )
 
     # حجز موعد
     if any(w in text for w in ["حجز", "موعد", "زيارة", "معاينة"]):
         return (
-            "ممكن نرتبلك موعد زيارة مع مستشار عقاري.\n"
-            "الزيارة مجانية وبدون التزام!\n"
-            "ممكن أعرف اسمك الكريم ورقم تليفونك عشان نتواصل معاك؟ 📅"
+            "يسعدنا جداً نرتب لحضرتك زيارة للموقع!\n"
+            "أقدر أرتبلك تواصل مباشر مع مسؤول المبيعات.\n"
+            "ممكن أعرف اسم حضرتك ورقم التواصل؟ 📅"
         )
 
     # مستشار
-    if any(w in text for w in ["مستشار", "أتكلم", "حد يكلمني", "تواصل"]):
-        return (
-            "طبعاً! هحولك لأحد مستشارينا العقاريين.\n"
-            "ممكن أعرف اسمك الكريم ورقم تليفونك عشان يتواصل معاك في أقرب وقت؟ 👤"
+    if any(w in text for w in ["مستشار", "أتكلم", "حد يكلمني", "تواصل"]):        return (
+            "أكيد! أقدر أرتبلك تواصل مباشر مع مسؤول المبيعات.\n"
+            "ممكن أعرف اسم حضرتك ورقم التواصل عشان يرد عليك في أقرب وقت؟ 📞"
         )
 
     # رد افتراضي
     return (
-        "أهلاً بيك! أنا المساعد الذكي لسكاي لاينز.\n"
-        "أقدر أساعدك في:\n"
-        "• معلومات عن المشاريع والأسعار\n"
-        "• حجز موعد زيارة\n"
-        "• التحدث مع مستشار عقاري\n\n"
-        "إيه اللي تحب تعرفه؟ 😊"
+        "أهلاً بحضرتك! أنا أسيل من Sky Lines Group 😊\n"
+        "أقدر أساعدك في معلومات عن مشروعاتنا وأسعارها وأنظمة السداد.\n"
+        "حضرتك بتدور على إيه بالظبط؟"
     )
 
 
 # ============================================
 # MESSAGE HANDLER
 # ============================================
+
 def handle_message(user_id, message_text, platform="messenger"):
     """
     معالج الرسائل الرئيسي - يرسل كل رسالة للـ AI Agent
@@ -304,7 +358,6 @@ def handle_message(user_id, message_text, platform="messenger"):
     text = message_text.strip()
     if not text:
         return
-
     logger.info(f"[{platform}] Message from {user_id}: {text[:100]}")
 
     # الحصول على رد الـ AI
@@ -317,6 +370,7 @@ def handle_message(user_id, message_text, platform="messenger"):
 # ============================================
 # COMMENT HANDLER
 # ============================================
+
 def handle_comment(comment_data):
     """معالج تعليقات فيسبوك - يرد على التعليقات ذات الصلة"""
     comment_id = comment_data.get("comment_id")
@@ -328,8 +382,7 @@ def handle_comment(comment_data):
         return
 
     # التحقق من الكلمات المفتاحية
-    if any(keyword in comment_text for keyword in COMMENT_KEYWORDS):
-        # رد عام على التعليق
+    if any(keyword in comment_text for keyword in COMMENT_KEYWORDS):        # رد عام على التعليق
         public_reply = f"أهلاً {sender_name}! 👋 بعتنالك رسالة خاصة بكل التفاصيل. تابع الماسنجر!"
         reply_to_comment(comment_id, public_reply)
 
@@ -341,7 +394,6 @@ def handle_comment(comment_data):
             "messenger"
         )
         send_private_reply(comment_id, ai_response)
-
         logger.info(f"AI responded to comment from {sender_name}: {comment_text[:50]}")
 
     elif any(word in comment_text for word in ["ممتاز", "جميل", "حلو", "رائع", "شكراً", "شكرا", "❤", "👍"]):
@@ -351,10 +403,10 @@ def handle_comment(comment_data):
 # ============================================
 # SEND FUNCTIONS - MESSENGER
 # ============================================
+
 def send_message(user_id, text, platform="messenger"):
     """إرسال رسالة نصية"""
-    if platform == "whatsapp":
-        send_whatsapp_message(user_id, text)
+    if platform == "whatsapp":        send_whatsapp_message(user_id, text)
     else:
         send_messenger_message(user_id, text)
 
@@ -370,6 +422,7 @@ def send_messenger_message(recipient_id, text):
     else:
         _send_messenger_raw(recipient_id, text)
 
+
 def _send_messenger_raw(recipient_id, text):
     """إرسال رسالة واحدة عبر Messenger API"""
     url = f"{GRAPH_API_URL}/me/messages"
@@ -377,8 +430,7 @@ def _send_messenger_raw(recipient_id, text):
         "recipient": {"id": recipient_id},
         "message": {"text": text},
         "messaging_type": "RESPONSE"
-    }
-    params = {"access_token": PAGE_ACCESS_TOKEN}
+    }    params = {"access_token": PAGE_ACCESS_TOKEN}
 
     try:
         response = requests.post(url, json=payload, params=params, timeout=10)
@@ -391,17 +443,18 @@ def _send_messenger_raw(recipient_id, text):
 def send_quick_replies(recipient_id, text, buttons):
     """إرسال رسالة مع أزرار اختيار سريع عبر Messenger"""
     url = f"{GRAPH_API_URL}/me/messages"
+
     quick_replies = [
         {"content_type": "text", "title": btn["title"][:20], "payload": btn["payload"]}
         for btn in buttons[:13]
     ]
+
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text, "quick_replies": quick_replies},
         "messaging_type": "RESPONSE"
     }
     params = {"access_token": PAGE_ACCESS_TOKEN}
-
     try:
         response = requests.post(url, json=payload, params=params, timeout=10)
         response.raise_for_status()
@@ -425,8 +478,7 @@ def reply_to_comment(comment_id, text):
 
 def send_private_reply(comment_id, text):
     """إرسال رد خاص لصاحب التعليق عبر Messenger"""
-    url = f"{GRAPH_API_URL}/me/messages"
-    payload = {
+    url = f"{GRAPH_API_URL}/me/messages"    payload = {
         "recipient": {"comment_id": comment_id},
         "message": {"text": text},
         "messaging_type": "RESPONSE"
@@ -444,13 +496,13 @@ def send_private_reply(comment_id, text):
 # ============================================
 # SEND FUNCTIONS - WHATSAPP
 # ============================================
+
 def send_whatsapp_message(phone_number, text):
     """إرسال رسالة عبر WhatsApp Business API"""
     # تقسيم الرسائل الطويلة (حد واتساب 4096 حرف)
     if len(text) > 4000:
         chunks = split_message(text, 4000)
-        for chunk in chunks:
-            _send_whatsapp_raw(phone_number, chunk)
+        for chunk in chunks:            _send_whatsapp_raw(phone_number, chunk)
             time.sleep(0.5)
     else:
         _send_whatsapp_raw(phone_number, text)
@@ -474,13 +526,13 @@ def _send_whatsapp_raw(phone_number, text):
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
         logger.info(f"WhatsApp message sent to {phone_number}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to send WhatsApp message: {e}")
+    except requests.exceptions.RequestException as e:        logger.error(f"Failed to send WhatsApp message: {e}")
 
 
 def send_whatsapp_buttons(phone_number, text, buttons):
     """إرسال رسالة مع أزرار عبر WhatsApp"""
     url = f"{GRAPH_API_URL}/{WHATSAPP_PHONE_ID}/messages"
+
     rows = [{"id": btn["payload"], "title": btn["title"][:24]} for btn in buttons[:10]]
 
     payload = {
@@ -494,12 +546,11 @@ def send_whatsapp_buttons(phone_number, text, buttons):
                 "button": "اختر",
                 "sections": [{"title": "الخيارات", "rows": rows}]
             }
-  }
+        }
     }
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}"
-    }
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}"    }
 
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
@@ -511,6 +562,7 @@ def send_whatsapp_buttons(phone_number, text, buttons):
 def send_whatsapp_template(phone_number, template_name, parameters):
     """إرسال رسالة قالب عبر WhatsApp (لبدء محادثات جديدة)"""
     url = f"{GRAPH_API_URL}/{WHATSAPP_PHONE_ID}/messages"
+
     components = []
     if parameters:
         components.append({
@@ -522,8 +574,7 @@ def send_whatsapp_template(phone_number, template_name, parameters):
         "messaging_product": "whatsapp",
         "to": phone_number,
         "type": "template",
-        "template": {
-            "name": template_name,
+        "template": {            "name": template_name,
             "language": {"code": "ar"},
             "components": components
         }
@@ -543,20 +594,18 @@ def send_whatsapp_template(phone_number, template_name, parameters):
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
+
 def split_message(text, max_length):
     """تقسيم رسالة طويلة إلى أجزاء"""
     chunks = []
-    while len(text) > max_length:
-        # البحث عن آخر سطر جديد قبل الحد
+    while len(text) > max_length:        # البحث عن آخر سطر جديد قبل الحد
         split_at = text.rfind('\n', 0, max_length)
         if split_at == -1:
             split_at = text.rfind(' ', 0, max_length)
         if split_at == -1:
             split_at = max_length
-
         chunks.append(text[:split_at].strip())
         text = text[split_at:].strip()
-
     if text:
         chunks.append(text)
     return chunks
@@ -565,14 +614,13 @@ def split_message(text, max_length):
 # ============================================
 # LEAD MANAGEMENT
 # ============================================
+
 def save_lead(lead):
     """حفظ بيانات العميل المحتمل"""
     leads_db.append(lead)
     logger.info(f"Lead saved: {lead.get('name', 'Unknown')} - {lead.get('phone', 'N/A')}")
-
     # TODO: Uncomment and configure for Google Sheets integration
     # save_to_google_sheets(lead)
-
 
 def notify_sales_team(lead):
     """إشعار فريق المبيعات بعميل جديد"""
@@ -586,6 +634,7 @@ def notify_sales_team(lead):
 # ============================================
 # WEBHOOK ROUTES
 # ============================================
+
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     """التحقق من Webhook لفيسبوك"""
@@ -597,7 +646,6 @@ def verify_webhook():
         logger.info("Facebook webhook verified!")
         return challenge, 200
     return "Verification failed", 403
-
 
 @app.route("/webhook", methods=["POST"])
 def handle_webhook():
@@ -623,7 +671,6 @@ def handle_webhook():
                 elif "postback" in messaging_event:
                     payload = messaging_event["postback"]["payload"]
                     handle_message(sender_id, payload, "messenger")
-
             # معالجة تعليقات فيسبوك
             for change in entry.get("changes", []):
                 if change.get("field") == "feed" and change["value"].get("item") == "comment":
@@ -648,7 +695,6 @@ def verify_whatsapp_webhook():
 def handle_whatsapp_webhook():
     """معالجة الرسائل الواردة من واتساب"""
     data = request.get_json()
-
     if data.get("object") == "whatsapp_business_account":
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
@@ -672,13 +718,13 @@ def handle_whatsapp_webhook():
 
                         if text:
                             handle_message(phone, text, "whatsapp")
-
     return "OK", 200
 
 
 # ============================================
 # API ENDPOINTS (Dashboard / Admin)
 # ============================================
+
 @app.route("/api/leads", methods=["GET"])
 def get_leads():
     """عرض كل العملاء المحتملين"""
@@ -696,8 +742,7 @@ def get_stats():
             "messenger": len([l for l in leads_db if l.get("platform") == "messenger"]),
             "whatsapp": len([l for l in leads_db if l.get("platform") == "whatsapp"]),
             "auto": len([l for l in leads_db if l.get("platform") == "auto"]),
-        }
-    })
+        }    })
 
 
 @app.route("/api/conversations/<user_id>", methods=["GET"])
@@ -721,8 +766,7 @@ def health_check():
         "status": "running",
         "ai_engine": ai_status,
         "facebook": fb_status,
-        "whatsapp": wa_status,
-        "uptime": "OK",
+        "whatsapp": wa_status,        "uptime": "OK",
         "model": AI_MODEL,
     })
 
@@ -730,20 +774,20 @@ def health_check():
 # ============================================
 # MAIN
 # ============================================
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
 
     # التحقق من الإعدادات
     if not ANTHROPIC_API_KEY:
-        logger.warning("⚠️  ANTHROPIC_API_KEY not set - AI Agent will use basic fallback responses")
+        logger.warning("⚠️ ANTHROPIC_API_KEY not set - AI Agent will use basic fallback responses")
     else:
         logger.info(f"🤖 AI Engine: {AI_MODEL}")
 
     if not PAGE_ACCESS_TOKEN:
-        logger.warning("⚠️  PAGE_ACCESS_TOKEN not set - Messenger won't work")
+        logger.warning("⚠️ PAGE_ACCESS_TOKEN not set - Messenger won't work")
 
     if not WHATSAPP_TOKEN:
-        logger.warning("⚠️  WHATSAPP_TOKEN not set - WhatsApp won't work")
+        logger.warning("⚠️ WHATSAPP_TOKEN not set - WhatsApp won't work")
 
-    logger.info(f"🚀 Sky Lines AI Agent starting on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    logger.info(f"🚀 Sky Lines AI Agent starting on port {port}")    app.run(host="0.0.0.0", port=port, debug=True)
