@@ -43,10 +43,10 @@ AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-20250514")
 GRAPH_API_URL = "https://graph.facebook.com/v19.0"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
-# Import knowledge base
+# Import knowledge baseh
 from knowledge_base import (
     get_system_prompt, COMMENT_KEYWORDS, COMPANY_INFO,
-    PROJECTS, PAYMENT_PLANS, FAQ, format_projects_for_search
+    format_projects_for_search
 )
 
 # ============================================
