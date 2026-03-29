@@ -67,7 +67,7 @@ def ask_ai(user_id, user_message, platform="messenger"):
     يحتفظ بسياق المحادثة لكل عميل
     """
     if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set - falling back to basic responses")
+        logger.warning("ANTHROPIC_API_KEY not set - falling back to keyword responses")
         return fallback_response(user_message)
 
     # إضافة رسالة العميل للتاريخ
@@ -92,13 +92,19 @@ def ask_ai(user_id, user_message, platform="messenger"):
                 user_context += f"، مهتم بـ: {data['interest']}"
             user_context += "]"
 
+    # هل هذه أول رسالة في المحادثة؟
+    is_first_message = len(conversation_history[user_id]) == 1
+
     system_prompt = get_system_prompt()
     if user_context:
         system_prompt += f"\n\n## معلومات العميل الحالي:{user_context}"
 
     system_prompt += f"\n\n## المنصة الحالية: {platform}"
     if platform == "whatsapp":
-        system_prompt += "\n(العميل على واتساب - الردود لازم تكون أقصر شوية)"
+        system_prompt += "\n(العميل على واتساب — اجعلي ردودك أقصر وأكثر مباشرة)"
+
+    if is_first_message:
+        system_prompt += "\n\n## تنبيه: هذه أول رسالة من العميل — تأكدي من ذكر اسمك 'أسيل' في ردك بشكل طبيعي."
 
     # إرسال الطلب لـ Claude API
     headers = {
@@ -114,6 +120,12 @@ def ask_ai(user_id, user_message, platform="messenger"):
         "messages": conversation_history[user_id],
     }
 
+    logger.info(
+        f"[ask_ai] Sending to Claude | user={user_id} | platform={platform} "
+        f"| model={AI_MODEL} | history_len={len(conversation_history[user_id])} "
+        f"| first_msg={is_first_message} | msg_preview={user_message[:80]!r}"
+    )
+
     try:
         response = requests.post(
             ANTHROPIC_API_URL,
@@ -123,7 +135,22 @@ def ask_ai(user_id, user_message, platform="messenger"):
         )
         response.raise_for_status()
         result = response.json()
-        ai_response = result["content"][0]["text"]
+
+        # التحقق من صحة الاستجابة
+        if not result.get("content") or not result["content"]:
+            logger.error(f"Claude returned empty content block: {result}")
+            conversation_history[user_id].pop()  # إزالة رسالة المستخدم من التاريخ
+            return fallback_response(user_message)
+
+        ai_response = result["content"][0].get("text", "").strip()
+
+        # التحقق من أن الرد ليس فارغاً أو قصيراً جداً
+        if not ai_response or len(ai_response) < 10:
+            logger.warning(
+                f"Claude returned a suspiciously short response ({len(ai_response)} chars): {ai_response!r}"
+            )
+            conversation_history[user_id].pop()  # إزالة رسالة المستخدم من التاريخ
+            return fallback_response(user_message)
 
         # حفظ رد الـ AI في التاريخ
         conversation_history[user_id].append({
@@ -134,20 +161,32 @@ def ask_ai(user_id, user_message, platform="messenger"):
         # محاولة استخراج بيانات العميل من المحادثة
         extract_user_data(user_id, user_message, ai_response)
 
-        logger.info(f"AI response for {user_id}: {ai_response[:100]}...")
+        logger.info(
+            f"[ask_ai] Claude responded | user={user_id} "
+            f"| response_len={len(ai_response)} | preview={ai_response[:120]!r}"
+        )
         return ai_response
 
     except requests.exceptions.Timeout:
-        logger.error("Claude API timeout")
+        logger.error(f"[ask_ai] Claude API timeout for user={user_id}")
+        conversation_history[user_id].pop()  # إزالة رسالة المستخدم من التاريخ
         return "عذراً، حصل تأخير بسيط. ممكن تبعت رسالتك تاني؟ 🙏"
 
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "unknown"
+        body = e.response.text[:300] if e.response is not None else ""
+        logger.error(f"[ask_ai] Claude HTTP error {status} for user={user_id}: {body}")
+        conversation_history[user_id].pop()  # إزالة رسالة المستخدم من التاريخ
+        return fallback_response(user_message)
+
     except requests.exceptions.RequestException as e:
-        logger.error(f"Claude API error: {e}")
-        # Fallback إلى الردود الأساسية
+        logger.error(f"[ask_ai] Claude request error for user={user_id}: {e}")
+        conversation_history[user_id].pop()  # إزالة رسالة المستخدم من التاريخ
         return fallback_response(user_message)
 
     except (KeyError, IndexError) as e:
-        logger.error(f"Unexpected API response format: {e}")
+        logger.error(f"[ask_ai] Unexpected API response format for user={user_id}: {e} | result={result}")
+        conversation_history[user_id].pop()  # إزالة رسالة المستخدم من التاريخ
         return fallback_response(user_message)
 
 
@@ -232,65 +271,114 @@ def auto_save_lead(user_id):
 def fallback_response(message):
     """
     ردود احتياطية في حالة عدم توفر AI API
-    تستخدم نظام كلمات مفتاحية بسيط
+    تستخدم نظام كلمات مفتاحية ذكي مع شخصية أسيل
     """
     text = message.lower().strip()
 
     # تحية
-    if any(w in text for w in ["سلام", "هاي", "مرحبا", "صباح", "مساء", "اهلا", "أهلا", "هلو"]):
+    if any(w in text for w in ["سلام", "هاي", "مرحبا", "صباح", "مساء", "اهلا", "أهلا", "هلو", "hi", "hello"]):
         return (
-            "أهلاً بيك في سكاي لاينز للعقارات! 🏢\n"
-            "أنا المساعد الذكي وهساعدك تلاقي عقار أحلامك.\n"
-            "إيه اللي تحب تعرفه؟\n"
-            "1️⃣ المشاريع المتاحة\n"
-            "2️⃣ الأسعار وأنظمة الدفع\n"
-            "3️⃣ حجز موعد زيارة\n"
-            "4️⃣ التحدث مع مستشار"
+            "أهلاً وسهلاً! أنا أسيل، مستشارتك العقارية في Sky Lines 😊\n"
+            "عندنا مشروع Sky Villas M7 في شرق النيل — بني سويف، وفيه وحدات سكنية وتجارية وإدارية.\n\n"
+            "حضرتك بتدور على سكن ولا استثمار؟"
         )
 
     # أسعار وتقسيط
-    if any(w in text for w in ["سعر", "كام", "تقسيط", "مقدم", "دفع", "قسط"]):
+    if any(w in text for w in ["سعر", "اسعار", "كام", "بكام", "تقسيط", "مقدم", "دفع", "قسط", "أقساط"]):
         return (
-            "أنظمة السداد عندنا مرنة جداً:\n"
-            "• مقدم يبدأ من 10% فقط\n"
-            "• تقسيط حتى 10 سنوات بدون فوائد\n"
-            "• خصم كاش حتى 15%\n\n"
-            "تحب أعرفك أسعار مشروع معين؟ أو أحسبلك القسط الشهري؟ 💰"
+            "الأسعار في Sky Villas M7 كالتالي 👇\n\n"
+            "🏠 السكني (3 غرف):\n"
+            "• 133م²: 2,175,000 ج — مقدم 652,500 ج — قسط شهري 108,750 ج\n"
+            "• 145م²: 2,355,000 ج — مقدم 706,500 ج — قسط شهري 117,750 ج\n"
+            "• 161م²: 2,595,000 ج — مقدم 778,500 ج — قسط شهري 129,750 ج\n\n"
+            "🏪 التجاري: مقدم 10% فقط — سعر المتر 35,000 ج\n"
+            "🏢 الإداري: 15,000 ج/م²\n\n"
+            "حضرتك مهتم بأنهي نوع — سكني ولا تجاري ولا إداري؟"
         )
 
-    # مشاريع
-    if any(w in text for w in ["مشاريع", "شقة", "شقق", "فيلا", "فيلات", "محل", "مكتب"]):
+    # محلات تجارية
+    if any(w in text for w in ["محل", "محلات", "تجاري", "تجارية"]):
         return (
-            "عندنا مشاريع متنوعة في:\n"
-            "🏠 بني سويف - القاهرة الجديدة - العاصمة الإدارية\n"
-            "🏠 6 أكتوبر - الساحل الشمالي\n\n"
-            "شقق وفيلات ومحلات ومكاتب.\n"
-            "مهتم بأنهي نوع ومنطقة؟"
+            "المحلات التجارية في M7 فرصة استثمارية ممتازة 🏪\n\n"
+            "• 5 محلات متاحة بواجهات زجاجية مضاءة\n"
+            "• مقدم 10% فقط (الأقل في السوق!)\n"
+            "• سعر المتر 35,000 ج بمقدم 10%، أو 32,000 ج بمقدم 30%\n"
+            "• الاستلام: يوليو 2027\n\n"
+            "تحب أعرفك تفاصيل محل معين؟ 📞 01055993391"
         )
 
-    # حجز موعد
-    if any(w in text for w in ["حجز", "موعد", "زيارة", "معاينة"]):
+    # شقق سكنية
+    if any(w in text for w in ["شقة", "شقق", "سكني", "سكنية", "غرف"]):
         return (
-            "ممكن نرتبلك موعد زيارة مع مستشار عقاري.\n"
-            "الزيارة مجانية وبدون التزام!\n"
-            "ممكن أعرف اسمك الكريم ورقم تليفونك عشان نتواصل معاك؟ 📅"
+            "الشقق في Sky Villas M7 كلها 3 غرف بمساحات مختلفة 🏠\n\n"
+            "• 133م²: 2,175,000 ج\n"
+            "• 145م²: 2,355,000 ج\n"
+            "• 161م²: 2,595,000 ج\n\n"
+            "التشطيب كور شيل — والواجهة والمداخل فاخرة جاهزة على نفقة الشركة.\n"
+            "حضرتك بتفكر للسكن الشخصي ولا للاستثمار والتأجير؟"
         )
 
-    # مستشار
-    if any(w in text for w in ["مستشار", "أتكلم", "حد يكلمني", "تواصل"]):
+    # وحدات إدارية وعيادات
+    if any(w in text for w in ["مكتب", "مكاتب", "إداري", "اداري", "عيادة", "عيادات"]):
         return (
-            "طبعاً! هحولك لأحد مستشارينا العقاريين.\n"
-            "ممكن أعرف اسمك الكريم ورقم تليفونك عشان يتواصل معاك في أقرب وقت؟ 👤"
+            "الوحدات الإدارية في M7 مناسبة جداً للعيادات والمكاتب 🏢\n\n"
+            "• 5 وحدات قابلة للتقسيم حسب احتياجك\n"
+            "• سعر المتر 15,000 ج\n"
+            "• سداد حتى يوليو 2027\n\n"
+            "تحب تعرف المساحات المتاحة؟ أو نرتب زيارة للموقع؟"
+        )
+
+    # موقع وعنوان
+    if any(w in text for w in ["موقع", "فين", "عنوان", "بني سويف", "شرق النيل"]):
+        return (
+            "المشروع في قلب شرق النيل — بني سويف 📍\n\n"
+            "الأربع حارات، بجوار مدرسة سان جورج وكافيه ديسباسيتو — الحي الأول.\n"
+            "موقع استراتيجي ممتاز وسهل الوصول.\n\n"
+            "تحب نرتب زيارة للموقع؟ 😊"
+        )
+
+    # استلام وتسليم
+    if any(w in text for w in ["استلام", "تسليم", "امتى", "ميعاد", "موعد"]):
+        return (
+            "موعد الاستلام 1 يوليو 2027 — يعني تقريباً 14 لـ 16 شهر من دلوقتي ⏳\n\n"
+            "ده من أقصر مواعيد التسليم في السوق — المنافسون بياخدوا 18 لـ 36 شهر.\n"
+            "حضرتك مهتم بوحدة سكنية ولا تجارية؟"
+        )
+
+    # حجز وزيارة
+    if any(w in text for w in ["حجز", "احجز", "زيارة", "معاينة", "موعد زيارة"]):
+        return (
+            "يسعدنا نرتبلك زيارة للموقع! 🤝\n\n"
+            "تواصل معانا مباشرة:\n"
+            "📞 01055993391\n"
+            "📍 شرق النيل – بني سويف – الحي الأول\n\n"
+            "ممكن أعرف اسمك الكريم عشان أسهّل التواصل؟"
+        )
+
+    # تواصل ومستشار
+    if any(w in text for w in ["مستشار", "تواصل", "رقم", "تليفون", "واتساب", "حد يكلمني"]):
+        return (
+            "بكل سرور! 😊\n\n"
+            "تواصل مع فريق المبيعات مباشرة:\n"
+            "📞 01055993391\n\n"
+            "ولو حابب أعرف أكثر عن المشروع قبل ما تتواصل، أنا هنا أساعدك!"
+        )
+
+    # sky villas أو m7
+    if any(w in text for w in ["sky", "villas", "سكاي", "لاين", "m7", "skylines"]):
+        return (
+            "Sky Villas M7 هو مشروعنا الرئيسي النشط دلوقتي 🌟\n\n"
+            "مبنى متكامل في شرق النيل — بني سويف:\n"
+            "🏪 محلات تجارية | 🏢 وحدات إدارية | 🏠 شقق سكنية\n"
+            "واجهة كلاسيكية أوروبية فاخرة — استلام يوليو 2027\n\n"
+            "حضرتك مهتم بأنهي نوع وحدة؟"
         )
 
     # رد افتراضي
     return (
-        "أهلاً بيك! أنا المساعد الذكي لسكاي لاينز.\n"
-        "أقدر أساعدك في:\n"
-        "• معلومات عن المشاريع والأسعار\n"
-        "• حجز موعد زيارة\n"
-        "• التحدث مع مستشار عقاري\n\n"
-        "إيه اللي تحب تعرفه؟ 😊"
+        "أهلاً! أنا أسيل من Sky Lines 😊\n\n"
+        "عندنا مشروع Sky Villas M7 في شرق النيل — بني سويف، بوحدات سكنية وتجارية وإدارية بأسعار تنافسية.\n\n"
+        "إيه اللي يهمك تعرفه؟ الأسعار؟ الموقع؟ أنظمة السداد؟"
     )
 
 
