@@ -2,9 +2,9 @@
 Sky Lines Real Estate - AI Agent
 =================================
 Facebook Messenger + WhatsApp + Facebook Comments
-Powered by Flask + Anthropic Claude API + Facebook Graph API + WhatsApp Business API
+Powered by Flask + OpenAI GPT API + Facebook Graph API + WhatsApp Business API
 
-هذا البوت يستخدم AI حقيقي (Claude) للرد على العملاء كموظف مبيعات محترف.
+هذا البوت يستخدم AI حقيقي (GPT) للرد على العملاء كموظف مبيعات محترف.
 يفهم السياق، يتذكر المحادثة، ويتعامل مع أي سؤال بذكاء.
 
 Setup:
@@ -39,11 +39,11 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-AI_MODEL = os.getenv("AI_MODEL", "claude-3-5-sonnet-20241022")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4.1-mini")
 
 GRAPH_API_URL = "https://graph.facebook.com/v19.0"
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 # Import knowledge base
 from knowledge_base import (
@@ -112,11 +112,11 @@ def sanitize_history(history):
 
 def ask_ai(user_id, user_message, platform="messenger"):
     """
-    إرسال رسالة العميل إلى Claude API والحصول على رد ذكي
+    إرسال رسالة العميل إلى OpenAI API والحصول على رد ذكي
     يحتفظ بسياق المحادثة لكل عميل
     """
-    if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set - falling back to basic responses")
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY not set - falling back to basic responses")
         return fallback_response(user_message)
 
     # إضافة رسالة العميل للتاريخ
@@ -155,32 +155,33 @@ def ask_ai(user_id, user_message, platform="messenger"):
     if platform == "whatsapp":
         system_prompt += "\n(العميل على واتساب - الردود لازم تكون أقصر شوية)"
 
-    # إرسال الطلب لـ Claude API
+    # إرسال الطلب لـ OpenAI API
     headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
     }
+
+    # OpenAI يستخدم system message داخل الـ messages array
+    messages = [{"role": "system", "content": system_prompt}] + clean_history
 
     payload = {
         "model": AI_MODEL,
         "max_tokens": 500,
-        "system": system_prompt,
-        "messages": clean_history,
+        "messages": messages,
     }
 
     try:
         response = requests.post(
-            ANTHROPIC_API_URL, headers=headers, json=payload, timeout=30
+            OPENAI_API_URL, headers=headers, json=payload, timeout=30
         )
 
         # تسجيل تفاصيل الخطأ قبل raise_for_status
         if response.status_code != 200:
-            logger.error(f"Claude API HTTP {response.status_code}: {response.text[:500]}")
+            logger.error(f"OpenAI API HTTP {response.status_code}: {response.text[:500]}")
 
         response.raise_for_status()
         result = response.json()
-        ai_response = result["content"][0]["text"]
+        ai_response = result["choices"][0]["message"]["content"]
 
         # حفظ رد الـ AI في التاريخ
         conversation_history[user_id].append({
@@ -195,7 +196,7 @@ def ask_ai(user_id, user_message, platform="messenger"):
         return ai_response
 
     except requests.exceptions.Timeout:
-        logger.error("Claude API timeout")
+        logger.error("OpenAI API timeout")
         fb_response = "عذراً، حصل تأخير بسيط. ممكن تبعت رسالتك تاني؟ 🙏"
         # إضافة رد الـ fallback للتاريخ لمنع تكرار دور user
         conversation_history[user_id].append({
@@ -205,7 +206,7 @@ def ask_ai(user_id, user_message, platform="messenger"):
         return fb_response
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Claude API error: {e}")
+        logger.error(f"OpenAI API error: {e}")
         fb_response = fallback_response(user_message)
         # إضافة رد الـ fallback للتاريخ لمنع تكرار دور user
         conversation_history[user_id].append({
@@ -789,7 +790,7 @@ def get_conversation(user_id):
 @app.route("/api/health", methods=["GET"])
 def health_check():
     """فحص حالة البوت"""
-    ai_status = "configured" if ANTHROPIC_API_KEY else "not configured (using fallback)"
+    ai_status = "configured" if OPENAI_API_KEY else "not configured (using fallback)"
     fb_status = "configured" if PAGE_ACCESS_TOKEN else "not configured"
     wa_status = "configured" if WHATSAPP_TOKEN else "not configured"
 
@@ -811,8 +812,8 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
 
     # التحقق من الإعدادات
-    if not ANTHROPIC_API_KEY:
-        logger.warning("⚠️ ANTHROPIC_API_KEY not set - AI Agent will use basic fallback responses")
+    if not OPENAI_API_KEY:
+        logger.warning("⚠️ OPENAI_API_KEY not set - AI Agent will use basic fallback responses")
     else:
         logger.info(f"🤖 AI Engine: {AI_MODEL}")
 
