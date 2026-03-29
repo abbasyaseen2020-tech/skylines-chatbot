@@ -498,7 +498,7 @@ def send_message(user_id, text, platform="messenger"):
 
 
 def send_messenger_message(recipient_id, text):
-    """إرسال رسالة عبر Messenger""""
+    """إرسال رسالة عبر Messenger"""
     if len(text) > 2000:
         chunks = split_message(text, 2000)
         for chunk in chunks:
