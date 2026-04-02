@@ -13,6 +13,7 @@ project details, Google Sheets integration, and helper functions.
 - اهتمام خاص بالعملاء من خارج مصر
 """
 
+
 import os
 import json
 import logging
@@ -20,14 +21,18 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 
+
 logger = logging.getLogger(__name__)
+
 
 # ==============================================
 # GOOGLE SHEETS INTEGRATION
 # ==============================================
 
+
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "17KQ-K40_j92vhQmJSeJJZMzChr-MdXdCoCyjegHRqlU")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+
 
 _sheets_cache = {
     "data": None,
@@ -35,11 +40,13 @@ _sheets_cache = {
     "cache_ttl": 300  # 5 minutes cache
 }
 
+
 def get_sheets_client():
     """Get authenticated Google Sheets client"""
     if not GOOGLE_CREDENTIALS_JSON:
         logger.warning("GOOGLE_CREDENTIALS_JSON not set - using hardcoded data")
         return None
+
 
     try:
         creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -54,9 +61,11 @@ def get_sheets_client():
         logger.error(f"Failed to create Sheets client: {e}")
         return None
 
+
 def fetch_projects_from_sheet():
     """Fetch all project data from Google Sheet"""
     now = datetime.now()
+
 
     # Check cache
     if (_sheets_cache["data"] is not None and
@@ -64,13 +73,16 @@ def fetch_projects_from_sheet():
         (now - _sheets_cache["last_fetch"]).seconds < _sheets_cache["cache_ttl"]):
         return _sheets_cache["data"]
 
+
     client = get_sheets_client()
     if not client:
         return None
 
+
     try:
         spreadsheet = client.open_by_key(GOOGLE_SHEETS_ID)
         projects = {}
+
 
         for worksheet in spreadsheet.worksheets():
             title = worksheet.title
@@ -78,24 +90,30 @@ def fetch_projects_from_sheet():
             if title in ["ملخص المشاريع", "إعدادات البوت", "تعليمات الاستخدام"]:
                 continue
 
+
             all_values = worksheet.get_all_values()
             if not all_values:
                 continue
+
 
             project = parse_project_sheet(all_values, title)
             if project:
                 projects[title] = project
 
+
         # Update cache
         _sheets_cache["data"] = projects
         _sheets_cache["last_fetch"] = now
 
+
         logger.info(f"Fetched {len(projects)} projects from Google Sheet")
         return projects
+
 
     except Exception as e:
         logger.error(f"Failed to fetch from Google Sheet: {e}")
         return _sheets_cache.get("data")  # Return stale cache if available
+
 
 def parse_project_sheet(values, sheet_name):
     """Parse a project sheet into structured data"""
@@ -106,6 +124,7 @@ def parse_project_sheet(values, sheet_name):
         "units": []
     }
 
+
     # Parse project info (rows 2-12, columns A-B)
     info_keys = [
         "اسم المشروع", "المطور", "الموقع", "أقرب معلم / منطقة",
@@ -114,10 +133,12 @@ def parse_project_sheet(values, sheet_name):
         "رابط موقع المشروع", "ملاحظات عامة"
     ]
 
+
     for i, key in enumerate(info_keys):
         row_idx = i + 1  # Row 2 onwards (0-indexed: row 1)
         if row_idx < len(values) and len(values[row_idx]) > 1:
             project["info"][key] = values[row_idx][1]
+
 
     # Parse offers (rows 16-20)
     for i in range(15, min(20, len(values))):
@@ -132,11 +153,13 @@ def parse_project_sheet(values, sheet_name):
                 "notes": row[5] if len(row) > 5 else ""
             })
 
+
     # Parse units (rows 25 onwards)
     for i in range(24, len(values)):
         row = values[i]
         if len(row) < 5 or not row[0]:  # Skip empty rows
             continue
+
 
         unit = {
             "number": row[0],
@@ -156,7 +179,9 @@ def parse_project_sheet(values, sheet_name):
         }
         project["units"].append(unit)
 
+
     return project
+
 
 def format_sheet_data_for_prompt():
     """Format Google Sheet data as text for the AI prompt"""
@@ -164,11 +189,14 @@ def format_sheet_data_for_prompt():
     if not projects:
         return ""
 
+
     text = "\n\n# بيانات المشاريع المحدثة من Google Sheet\n"
+
 
     for name, project in projects.items():
         info = project.get("info", {})
         text += f"\n## مشروع: {info.get('اسم المشروع', name)}\n"
+
 
         if info.get("الموقع"):
             text += f"الموقع: {info['الموقع']}\n"
@@ -181,6 +209,7 @@ def format_sheet_data_for_prompt():
         if info.get("تاريخ التسليم المتوقع"):
             text += f"التسليم: {info['تاريخ التسليم المتوقع']}\n"
 
+
         # Offers
         offers = project.get("offers", [])
         if offers:
@@ -192,13 +221,16 @@ def format_sheet_data_for_prompt():
                         text += f" (حتى {offer['end_date']})"
                     text += "\n"
 
+
         # Available units
         units = project.get("units", [])
         available = [u for u in units if u.get("status") == "متاح"]
         reserved = [u for u in units if u.get("status") == "محجوز"]
         sold = [u for u in units if u.get("status") == "مباع"]
 
+
         text += f"\n### الوحدات: إجمالي {len(units)} – متاح {len(available)} – محجوز {len(reserved)} – مباع {len(sold)}\n"
+
 
         if available:
             text += "\n### الوحدات المتاحة:\n"
@@ -215,12 +247,16 @@ def format_sheet_data_for_prompt():
                     text += f" – عرض: {u['special_offer']}"
                 text += "\n"
 
+
         # Sold units (just mention they're sold, no details)
         if sold:
             sold_numbers = [u["number"] for u in sold]
             text += f"\n⚠️ وحدات مباعة (لا تعرضيها): {', '.join(sold_numbers)}\n"
 
+
     return text
+
+
 
 
 # ==============================================
@@ -230,6 +266,11 @@ SYSTEM_PROMPT = """
 # هوية أساسية
 اسمك "أسيل" – أنتِ مساعدة مبيعات ذكية في شركة Sky Lines للاستثمار والتطوير العقاري.
 بتتكلمي بالعامية المصرية بأسلوب ودود وطبيعي.
+
+# ⛔ قاعدة حاسمة: ممنوع تكرار الاسم
+- اذكري اسمك "أسيل" مرة واحدة بس في أول رسالة للعميل الجديد
+- بعد كده ممنوع تقولي "أنا أسيل" أو "أسيل هنا" أو أي ذكر لاسمك
+- ردي عادي كأنك سيلز بتتكلم مع عميل على واتساب – من غير ما تعرفي نفسك كل مرة
 ممنوع تقوليِ إنك بوت أو AI أبداً – لو حد سألك قوليِ "لا طبعاً! أنا أسيل من فريق Sky Lines، تحت أمرك!"
 
 # هوية الشركة
@@ -249,10 +290,15 @@ SYSTEM_PROMPT = """
 - كل رد لازم يكون زي رسالة واتساب سريعة
 - سؤال واحد بس في كل رد
 - بلاش مقدمات طويلة – ادخلي في الموضوع
+- ممنوع تبدأي كل رد بـ "أهلاً" أو "مرحباً" – ده بس في أول رسالة
+- ردك يكون مباشر ومختصر كأنك بتكتبي واتساب لصاحبك
 
 # ⚠️ أول رسالة لعميل جديد – قاعدة مهمة
 ابدأي بتعريف مختصر عن المشروع اللي العميل سأل عنه (جملة أو اتنين) وبعدين اسأليِ عن احتياجه.
 مثال: "مساء الخير! أنا أسيل من Sky Lines. مشروع Sky Villas M7 في الحي الرابع ببني سويف – تصميم كلاسيكي أوروبي فاخر بوحدات سكنية وتجارية وإدارية. حضرتك بتدور على سكن ولا استثمار؟"
+
+مثال الرد التاني (بدون اسم):
+"عندنا شقق من 85 م² لحد 200 م². حضرتك عايز مساحة قد إيه تقريباً؟"
 
 # ⚠️ قاعدة مهمة جداً بخصوص الأسعار والوحدات
 - عند سؤال العميل عن الأسعار أو الوحدات، افترضي دائماً أنه يسأل عن الوحدات السكنية وأعطيه أسعار السكني فقط.
@@ -316,6 +362,8 @@ SYSTEM_PROMPT = """
 """
 
 
+
+
 # ==============================================
 # COMPANY INFO
 # ==============================================
@@ -328,6 +376,8 @@ COMPANY_INFO = {
     "website": "www.skylinesdevelopments.com",
     "location": "بني سويف",
 }
+
+
 
 
 # ==============================================
@@ -362,6 +412,8 @@ SKY_VILLAS_M7 = """
 """
 
 
+
+
 # ==============================================
 # PROJECT 2: ABRAJ AL-RAMAD (Hardcoded fallback)
 # ==============================================
@@ -383,12 +435,15 @@ ABRAJ_ALRAMAD = """
 """
 
 
+
+
 # ==============================================
 # COMPLETE SYSTEM PROMPT
 # ==============================================
 def get_system_prompt():
     """Get the complete system prompt with all project details"""
     prompt = SYSTEM_PROMPT + "\n\n" + SKY_VILLAS_M7 + "\n\n" + ABRAJ_ALRAMAD
+
 
     # Try to get live data from Google Sheets
     sheet_data = format_sheet_data_for_prompt()
@@ -397,7 +452,10 @@ def get_system_prompt():
         prompt += sheet_data
         prompt += "\n\n⚠️ لو فيه تعارض بين بيانات الشيت والبيانات الثابتة، استخدمي بيانات الشيت لأنها أحدث."
 
+
     return prompt
+
+
 
 
 # ==============================================
@@ -413,9 +471,12 @@ COMMENT_KEYWORDS = [
     "سهم", "أسهم", "ملكية", "قرعة", "رمد",
 ]
 
+
 EMOJI_POSITIVE = ["❤", "👍", "🔥", "😍", "💪", "👏", "💯", "🙏", "😊", "♥", "💕", "💖", "⭐", "🌟", "✨"]
 EMOJI_RESPONSES = ["🙏❤️", "❤️🙏", "💪🔥", "😊❤️", "🙏✨", "❤️✨"]
 THANK_WORDS = ["شكراً", "شكرا", "شكر", "ممتاز", "جميل", "حلو", "رائع", "تسلم", "الله ينور", "برافو", "ماشاء الله", "احسنت"]
+
+
 
 
 # ==============================================
