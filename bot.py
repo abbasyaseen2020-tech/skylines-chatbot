@@ -19,6 +19,8 @@ Setup:
 """
 
 
+
+
 import os
 import json
 import logging
@@ -27,6 +29,9 @@ import requests
 from datetime import datetime
 from collections import defaultdict
 from flask import Flask, request, jsonify
+import conversation_store
+
+
 
 
 # ============================================
@@ -40,6 +45,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+
+
 # Environment Variables
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
@@ -51,12 +58,16 @@ GRAPH_API_URL = "https://graph.facebook.com/v19.0"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
+
+
 # Import knowledge base (updated version with Google Sheets integration)
 from knowledge_base import (
     get_system_prompt, COMMENT_KEYWORDS, COMPANY_INFO,
     format_projects_for_search,
     EMOJI_POSITIVE, EMOJI_RESPONSES, THANK_WORDS
 )
+
+
 
 
 # ============================================
@@ -68,12 +79,18 @@ user_data = {}
 MAX_HISTORY = 20
 
 
+
+
 # ============================================
 # DUPLICATE MESSAGE PREVENTION
 # ============================================
 _processed_messages = {}  # message_id -> timestamp
 _processed_comments = {}  # comment_id -> timestamp
 MESSAGE_DEDUP_TTL = 60  # seconds - ignore duplicate within this window
+
+
+
+
 
 
 
@@ -87,11 +104,17 @@ def is_duplicate_message(msg_id):
         del _processed_messages[k]
 
 
+
+
     if msg_id in _processed_messages:
         logger.info(f"Duplicate message ignored: {msg_id}")
         return True
     _processed_messages[msg_id] = now
     return False
+
+
+
+
 
 
 
@@ -104,11 +127,17 @@ def is_duplicate_comment(comment_id):
         del _processed_comments[k]
 
 
+
+
     if comment_id in _processed_comments:
         logger.info(f"Duplicate comment ignored: {comment_id}")
         return True
     _processed_comments[comment_id] = now
     return False
+
+
+
+
 
 
 
@@ -126,14 +155,31 @@ def ask_ai(user_id, user_message, platform="messenger"):
         return fallback_response(user_message)
 
 
+
+
+    # Load persistent history for returning users
+    if not conversation_history[user_id]:
+        stored_history = conversation_store.load_history(user_id)
+        if stored_history:
+            conversation_history[user_id] = stored_history
+            logger.info(f"Restored {len(stored_history)} messages from persistent storage for {user_id}")
+
+
     conversation_history[user_id].append({
         "role": "user",
         "content": user_message
     })
 
+    # Save user message to persistent storage
+    conversation_store.save_message(user_id, platform, "user", user_message)
+
+
+
 
     if len(conversation_history[user_id]) > MAX_HISTORY:
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY:]
+
+
 
 
     user_context = ""
@@ -148,14 +194,25 @@ def ask_ai(user_id, user_message, platform="messenger"):
             user_context += "]"
 
 
+
+
     system_prompt = get_system_prompt()
     if user_context:
         system_prompt += f"\n\n## معلومات العميل الحالي:{user_context}"
 
 
+
+
     system_prompt += f"\n\n## المنصة الحالية: {platform}"
     if platform == "whatsapp":
         system_prompt += "\n(العميل على واتساب - الردود لازم تكون أقصر شوية)"
+
+    # Add past conversation context for returning users
+    conv_summary = conversation_store.get_conversation_summary(user_id)
+    if conv_summary:
+        system_prompt += conv_summary
+
+
 
 
     headers = {
@@ -165,12 +222,16 @@ def ask_ai(user_id, user_message, platform="messenger"):
     }
 
 
+
+
     payload = {
         "model": AI_MODEL,
         "max_tokens": 500,
         "system": system_prompt,
         "messages": conversation_history[user_id],
     }
+
+
 
 
     try:
@@ -184,7 +245,11 @@ def ask_ai(user_id, user_message, platform="messenger"):
         result = response.json()
 
 
+
+
         ai_response = result["content"][0]["text"]
+
+
 
 
         conversation_history[user_id].append({
@@ -192,12 +257,19 @@ def ask_ai(user_id, user_message, platform="messenger"):
             "content": ai_response
         })
 
+        # Save AI response to persistent storage
+        conversation_store.save_message(user_id, platform, "assistant", ai_response)
+
 
         extract_user_data(user_id, user_message, ai_response)
 
 
+
+
         logger.info(f"AI response for {user_id}: {ai_response[:100]}...")
         return ai_response
+
+
 
 
     except requests.exceptions.Timeout:
@@ -205,14 +277,22 @@ def ask_ai(user_id, user_message, platform="messenger"):
         return "عذراً، حصل تأخير بسيط. ممكن تبعت رسالتك تاني؟ 🙏"
 
 
+
+
     except requests.exceptions.RequestException as e:
         logger.error(f"Claude API error: {e}")
         return fallback_response(user_message)
 
 
+
+
     except (KeyError, IndexError) as e:
         logger.error(f"Unexpected API response format: {e}")
         return fallback_response(user_message)
+
+
+
+
 
 
 
@@ -224,6 +304,8 @@ def ask_ai_comment(comment_text, sender_name):
     """
     if not ANTHROPIC_API_KEY:
         return None
+
+
 
 
     system_prompt = get_system_prompt()
@@ -240,11 +322,15 @@ def ask_ai_comment(comment_text, sender_name):
 """
 
 
+
+
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
+
+
 
 
     messages = [{
@@ -253,12 +339,16 @@ def ask_ai_comment(comment_text, sender_name):
     }]
 
 
+
+
     payload = {
         "model": AI_MODEL,
         "max_tokens": 200,
         "system": system_prompt,
         "messages": messages,
     }
+
+
 
 
     try:
@@ -278,12 +368,20 @@ def ask_ai_comment(comment_text, sender_name):
 
 
 
+
+
+
+
 def extract_user_data(user_id, user_message, ai_response):
     if user_id not in user_data:
         user_data[user_id] = {}
 
 
+
+
     text = user_message.strip()
+
+
 
 
     phone = extract_phone(text)
@@ -293,12 +391,16 @@ def extract_user_data(user_id, user_message, ai_response):
             auto_save_lead(user_id)
 
 
+
+
     history = conversation_history.get(user_id, [])
     if len(history) >= 2:
         prev_msg = history[-2].get("content", "") if history[-2]["role"] == "assistant" else ""
         if any(word in prev_msg for word in ["اسمك", "اسم حضرتك", "نعرف اسمك"]):
             if len(text.split()) <= 4 and not text.startswith("0"):
                 user_data[user_id]["name"] = text
+
+
 
 
     interests = []
@@ -312,6 +414,10 @@ def extract_user_data(user_id, user_message, ai_response):
         interests.append("مكاتب إدارية")
     if interests:
         user_data[user_id]["interest"] = "، ".join(interests)
+
+
+
+
 
 
 
@@ -335,6 +441,10 @@ def extract_phone(text):
 
 
 
+
+
+
+
 def auto_save_lead(user_id):
     data = user_data.get(user_id, {})
     if data.get("name") and data.get("phone"):
@@ -354,8 +464,14 @@ def auto_save_lead(user_id):
 
 
 
+
+
+
+
 def fallback_response(message):
     text = message.lower().strip()
+
+
 
 
     if any(w in text for w in ["سلام", "هاي", "مرحبا", "صباح", "مساء", "اهلا", "أهلا", "هلو"]):
@@ -366,11 +482,15 @@ def fallback_response(message):
         )
 
 
+
+
     if any(w in text for w in ["سعر", "كام", "تقسيط", "مقدم", "دفع", "قسط"]):
         return (
             "الأسعار والأنظمة بتختلف حسب المشروع والوحدة.\n"
             "حضرتك مهتم بأنهي مشروع عشان أقدر أفيدك بالظبط؟"
         )
+
+
 
 
     if any(w in text for w in ["مشاريع", "شقة", "شقق", "فيلا", "فيلات", "محل", "مكتب"]):
@@ -380,6 +500,8 @@ def fallback_response(message):
         )
 
 
+
+
     if any(w in text for w in ["حجز", "موعد", "زيارة", "معاينة"]):
         return (
             "ممتاز! أقدر أرتبلك موعد مع فريق المبيعات.\n"
@@ -387,11 +509,17 @@ def fallback_response(message):
         )
 
 
+
+
     return (
         "أهلاً بيك في Sky Lines! 🏢\n"
         "أقدر أساعدك في معلومات عن مشاريعنا وأسعارها.\n"
         "إيه اللي تحب تعرفه؟ 😊"
     )
+
+
+
+
 
 
 
@@ -409,16 +537,26 @@ def handle_message(user_id, message_text, platform="messenger", message_id=None)
         return
 
 
+
+
     # Duplicate prevention
     if message_id and is_duplicate_message(message_id):
         return
 
 
+
+
     logger.info(f"[{platform}] Message from {user_id}: {text[:100]}")
+
+
 
 
     ai_response = ask_ai(user_id, text, platform)
     send_message(user_id, ai_response, platform)
+
+
+
+
 
 
 
@@ -439,8 +577,12 @@ def handle_comment(comment_data):
     verb = comment_data.get("verb", "")
 
 
+
+
     if verb != "add":
         return
+
+
 
 
     # Duplicate prevention
@@ -448,11 +590,15 @@ def handle_comment(comment_data):
         return
 
 
+
+
     # Check for positive/thank you comments first
     is_positive = (
         any(emoji in comment_text for emoji in EMOJI_POSITIVE) or
         any(word in comment_text for word in THANK_WORDS)
     )
+
+
 
 
     if is_positive and not any(keyword in comment_text for keyword in COMMENT_KEYWORDS):
@@ -465,6 +611,8 @@ def handle_comment(comment_data):
         reply_to_comment(comment_id, response)
         logger.info(f"Positive comment from {sender_name}: {comment_text[:50]}")
         return
+
+
 
 
     # Check for keyword-based comments (potential customer inquiry)
@@ -481,6 +629,8 @@ def handle_comment(comment_data):
             )
 
 
+
+
         # 2. Send private AI reply via Messenger with full details
         private_context = (
             f"العميل {sender_name} علّق على بوست الصفحة وقال: \"{comment_text}\". "
@@ -491,7 +641,13 @@ def handle_comment(comment_data):
         send_private_reply(comment_id, ai_private)
 
 
+
+
         logger.info(f"AI responded to comment from {sender_name}: {comment_text[:50]}")
+
+
+
+
 
 
 
@@ -508,6 +664,10 @@ def send_message(user_id, text, platform="messenger"):
 
 
 
+
+
+
+
 def send_messenger_message(recipient_id, text):
     if len(text) > 2000:
         chunks = split_message(text, 2000)
@@ -516,6 +676,10 @@ def send_messenger_message(recipient_id, text):
             time.sleep(0.5)
     else:
         _send_messenger_raw(recipient_id, text)
+
+
+
+
 
 
 
@@ -534,6 +698,10 @@ def _send_messenger_raw(recipient_id, text):
         logger.info(f"Messenger message sent to {recipient_id}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to send Messenger message: {e}")
+
+
+
+
 
 
 
@@ -559,6 +727,10 @@ def send_quick_replies(recipient_id, text, buttons):
 
 
 
+
+
+
+
 def reply_to_comment(comment_id, text):
     url = f"{GRAPH_API_URL}/{comment_id}/comments"
     payload = {"message": text}
@@ -569,6 +741,10 @@ def reply_to_comment(comment_id, text):
         logger.info(f"Replied to comment {comment_id}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to reply to comment: {e}")
+
+
+
+
 
 
 
@@ -591,6 +767,10 @@ def send_private_reply(comment_id, text):
 
 
 
+
+
+
+
 # ============================================
 # SEND FUNCTIONS - WHATSAPP
 # ============================================
@@ -602,6 +782,10 @@ def send_whatsapp_message(phone_number, text):
             time.sleep(0.5)
     else:
         _send_whatsapp_raw(phone_number, text)
+
+
+
+
 
 
 
@@ -624,6 +808,10 @@ def _send_whatsapp_raw(phone_number, text):
         logger.info(f"WhatsApp message sent to {phone_number}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to send WhatsApp message: {e}")
+
+
+
+
 
 
 
@@ -653,6 +841,10 @@ def send_whatsapp_buttons(phone_number, text, buttons):
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to send WhatsApp buttons: {e}")
+
+
+
+
 
 
 
@@ -688,6 +880,10 @@ def send_whatsapp_template(phone_number, template_name, parameters):
 
 
 
+
+
+
+
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
@@ -708,6 +904,10 @@ def split_message(text, max_length):
 
 
 
+
+
+
+
 # ============================================
 # LEAD MANAGEMENT
 # ============================================
@@ -718,11 +918,19 @@ def save_lead(lead):
 
 
 
+
+
+
+
 def notify_sales_team(lead):
     logger.info(
         f"🔔 New lead: {lead.get('name', '')} ({lead.get('phone', '')}) "
         f"- Interest: {lead.get('interest', 'غير محدد')}"
     )
+
+
+
+
 
 
 
@@ -743,10 +951,16 @@ def verify_webhook():
 
 
 
+
+
+
+
 @app.route("/webhook", methods=["POST"])
 def handle_webhook():
     """معالجة الأحداث الواردة من فيسبوك — مع منع التكرار"""
     data = request.get_json()
+
+
 
 
     if data.get("object") == "page":
@@ -757,9 +971,13 @@ def handle_webhook():
                 message_id = None
 
 
+
+
                 if "message" in messaging_event:
                     message = messaging_event["message"]
                     message_id = message.get("mid")  # Get message ID for dedup
+
+
 
 
                     if "quick_reply" in message:
@@ -768,13 +986,19 @@ def handle_webhook():
                         text = message.get("text", "")
 
 
+
+
                     if text:
                         handle_message(sender_id, text, "messenger", message_id)
+
+
 
 
                 elif "postback" in messaging_event:
                     payload = messaging_event["postback"]["payload"]
                     handle_message(sender_id, payload, "messenger")
+
+
 
 
             # معالجة تعليقات فيسبوك
@@ -783,7 +1007,13 @@ def handle_webhook():
                     handle_comment(change["value"])
 
 
+
+
     return "OK", 200
+
+
+
+
 
 
 
@@ -800,10 +1030,16 @@ def verify_whatsapp_webhook():
 
 
 
+
+
+
+
 @app.route("/whatsapp-webhook", methods=["POST"])
 def handle_whatsapp_webhook():
     """معالجة الرسائل الواردة من واتساب — مع منع التكرار"""
     data = request.get_json()
+
+
 
 
     if data.get("object") == "whatsapp_business_account":
@@ -814,6 +1050,8 @@ def handle_whatsapp_webhook():
                     for msg in messages:
                         phone = msg["from"]
                         msg_id = msg.get("id")  # WhatsApp message ID for dedup
+
+
 
 
                         if msg["type"] == "text":
@@ -830,11 +1068,19 @@ def handle_whatsapp_webhook():
                             text = ""
 
 
+
+
                         if text:
                             handle_message(phone, text, "whatsapp", msg_id)
 
 
+
+
     return "OK", 200
+
+
+
+
 
 
 
@@ -845,6 +1091,10 @@ def handle_whatsapp_webhook():
 @app.route("/api/leads", methods=["GET"])
 def get_leads():
     return jsonify({"leads": leads_db, "total": len(leads_db)})
+
+
+
+
 
 
 
@@ -865,6 +1115,10 @@ def get_stats():
 
 
 
+
+
+
+
 @app.route("/api/conversations/<user_id>", methods=["GET"])
 def get_conversation(user_id):
     return jsonify({
@@ -876,11 +1130,17 @@ def get_conversation(user_id):
 
 
 
+
+
+
+
 @app.route("/api/health", methods=["GET"])
 def health_check():
     ai_status = "configured" if ANTHROPIC_API_KEY else "not configured (using fallback)"
     fb_status = "configured" if PAGE_ACCESS_TOKEN else "not configured"
     wa_status = "configured" if WHATSAPP_TOKEN else "not configured"
+
+
 
 
     return jsonify({
@@ -895,11 +1155,17 @@ def health_check():
 
 
 
+
+
+
+
 # ============================================
 # MAIN
 # ============================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
+
+
 
 
     if not ANTHROPIC_API_KEY:
@@ -908,13 +1174,52 @@ if __name__ == "__main__":
         logger.info(f"🤖 AI Engine: {AI_MODEL}")
 
 
+
+
     if not PAGE_ACCESS_TOKEN:
         logger.warning("⚠️  PAGE_ACCESS_TOKEN not set - Messenger won't work")
+
+
 
 
     if not WHATSAPP_TOKEN:
         logger.warning("⚠️  WHATSAPP_TOKEN not set - WhatsApp won't work")
 
 
+
+
+    # Start follow-up reminder background thread
+    conversation_store.start_reminder_thread(send_message)
+    logger.info("📋 Conversation memory: enabled (Google Sheets)")
+    logger.info("⏰ Follow-up reminders: enabled (24h check)")
+
     logger.info(f"🚀 Sky Lines AI Agent starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
