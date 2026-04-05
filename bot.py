@@ -146,7 +146,7 @@ def ask_ai(user_id, user_message, platform="messenger"):
 
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
+        "anthropic-version": "2025-01-01",
         "content-type": "application/json",
     }
 
@@ -214,7 +214,7 @@ def ask_ai_comment(comment_text, sender_name):
 
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
+        "anthropic-version": "2025-01-01",
         "content-type": "application/json",
     }
 
