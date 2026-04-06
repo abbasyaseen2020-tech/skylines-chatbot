@@ -9,6 +9,7 @@ project details, Google Sheets integration, and helper functions.
 import os
 import json
 import logging
+import threading
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
@@ -25,7 +26,8 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
 _sheets_cache = {
     "data": None,
     "last_fetch": None,
-    "cache_ttl": 300
+    "cache_ttl": 300,
+    "loading": False
 }
 
 
@@ -47,18 +49,13 @@ def get_sheets_client():
         return None
 
 
-def fetch_projects_from_sheet():
-    now = datetime.now()
-    if (_sheets_cache["data"] is not None and
-        _sheets_cache["last_fetch"] is not None and
-        (now - _sheets_cache["last_fetch"]).seconds < _sheets_cache["cache_ttl"]):
-        return _sheets_cache["data"]
-
-    client = get_sheets_client()
-    if not client:
-        return None
-
+def _fetch_projects_worker():
+    """Background worker to fetch projects from Google Sheets."""
     try:
+        client = get_sheets_client()
+        if not client:
+            return
+
         spreadsheet = client.open_by_key(GOOGLE_SHEETS_ID)
         projects = {}
         for worksheet in spreadsheet.worksheets():
@@ -73,13 +70,35 @@ def fetch_projects_from_sheet():
                 projects[title] = project
 
         _sheets_cache["data"] = projects
-        _sheets_cache["last_fetch"] = now
+        _sheets_cache["last_fetch"] = datetime.now()
         logger.info(f"Fetched {len(projects)} projects from Google Sheet")
-        return projects
 
     except Exception as e:
         logger.error(f"Failed to fetch from Google Sheet: {e}")
-        return _sheets_cache.get("data")
+    finally:
+        _sheets_cache["loading"] = False
+
+
+def fetch_projects_from_sheet():
+    """Return cached data immediately. Refresh in background if stale."""
+    now = datetime.now()
+    cache_valid = (
+        _sheets_cache["data"] is not None and
+        _sheets_cache["last_fetch"] is not None and
+        (now - _sheets_cache["last_fetch"]).seconds < _sheets_cache["cache_ttl"]
+    )
+
+    if cache_valid:
+        return _sheets_cache["data"]
+
+    # Cache is stale or empty — trigger background refresh
+    if not _sheets_cache["loading"]:
+        _sheets_cache["loading"] = True
+        t = threading.Thread(target=_fetch_projects_worker, daemon=True)
+        t.start()
+
+    # Return whatever we have (None on first call, stale data after that)
+    return _sheets_cache.get("data")
 
 
 def parse_project_sheet(values, sheet_name):

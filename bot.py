@@ -19,6 +19,7 @@ import os
 import json
 import logging
 import time
+import threading
 import requests
 from datetime import datetime
 from collections import defaultdict
@@ -104,20 +105,23 @@ def ask_ai(user_id, user_message, platform="messenger"):
         logger.warning("ANTHROPIC_API_KEY not set - falling back to basic responses")
         return fallback_response(user_message)
 
-    # Load persistent history for returning users
+    # Load persistent history for returning users (non-blocking)
     if not conversation_history[user_id]:
-        stored_history = conversation_store.load_history(user_id)
-        if stored_history:
-            conversation_history[user_id] = stored_history
-            logger.info(f"Loaded {len(stored_history)} messages from persistent storage for {user_id}")
+        try:
+            stored_history = conversation_store.load_history(user_id)
+            if stored_history:
+                conversation_history[user_id] = stored_history
+                logger.info(f"Loaded {len(stored_history)} messages from persistent storage for {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to load history for {user_id}: {e}")
 
     conversation_history[user_id].append({
         "role": "user",
         "content": user_message
     })
 
-    # Save user message to persistent storage
-    conversation_store.save_message(user_id, platform, "user", user_message)
+    # Save user message to persistent storage (non-blocking)
+    threading.Thread(target=conversation_store.save_message, args=(user_id, platform, "user", user_message), daemon=True).start()
 
     if len(conversation_history[user_id]) > MAX_HISTORY:
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY:]
@@ -202,8 +206,8 @@ def ask_ai(user_id, user_message, platform="messenger"):
             "content": ai_response
         })
 
-        # Save AI response to persistent storage
-        conversation_store.save_message(user_id, platform, "assistant", ai_response)
+        # Save AI response to persistent storage (non-blocking)
+        threading.Thread(target=conversation_store.save_message, args=(user_id, platform, "assistant", ai_response), daemon=True).start()
 
         extract_user_data(user_id, user_message, ai_response)
 
@@ -835,7 +839,7 @@ if __name__ == "__main__":
     if not WHATSAPP_TOKEN:
         logger.warning("⚠️ WHATSAPP_TOKEN not set - WhatsApp won't work")
 
-    conversation_store.start_reminder_thread(send_message)
+    conversation_store.start_reminder_thread(send_message, whatsapp_template_func=send_whatsapp_template)
 
     logger.info("📋 Conversation memory: enabled (Google Sheets)")
     logger.info("💾 Leads storage: persistent (Google Sheets)")

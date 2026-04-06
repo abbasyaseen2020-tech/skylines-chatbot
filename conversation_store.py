@@ -425,9 +425,10 @@ def get_all_leads():
 # ============================================
 _reminder_thread = None
 _reminder_running = False
+_whatsapp_template_func = None
 
 
-def start_reminder_thread(send_message_func, interval_seconds=3600):
+def start_reminder_thread(send_message_func, interval_seconds=3600, whatsapp_template_func=None):
     """
     Start a background thread that checks for inactive users every hour
     and sends follow-up messages.
@@ -436,12 +437,13 @@ def start_reminder_thread(send_message_func, interval_seconds=3600):
         send_message_func: function(user_id, text, platform) to send messages
         interval_seconds: how often to check (default: 1 hour)
     """
-    global _reminder_thread, _reminder_running
+    global _reminder_thread, _reminder_running, _whatsapp_template_func
 
     if _reminder_thread and _reminder_thread.is_alive():
         logger.info("Reminder thread already running")
         return
 
+    _whatsapp_template_func = whatsapp_template_func
     _reminder_running = True
 
     def _reminder_loop():
@@ -476,18 +478,21 @@ def start_reminder_thread(send_message_func, interval_seconds=3600):
                             mark_follow_up_sent(user["user_id"])
                             logger.info(f"Follow-up sent to {user['user_id']} ({platform}, {hours}h inactive)")
                         elif platform == "whatsapp" and hours <= 72:
-                            # WhatsApp outside 24h — use template instead
-                            try:
-                                from bot import send_whatsapp_template
-                                send_whatsapp_template(
-                                    user["user_id"],
-                                    "follow_up_reminder",
-                                    [user.get("user_name", "")]
-                                )
-                                mark_follow_up_sent(user["user_id"])
-                                logger.info(f"WhatsApp template follow-up sent to {user['user_id']} ({hours}h)")
-                            except Exception as tmpl_err:
-                                logger.warning(f"Template send failed for {user['user_id']}: {tmpl_err}")
+                            # WhatsApp outside 24h — use template via callback if available
+                            if _whatsapp_template_func:
+                                try:
+                                    _whatsapp_template_func(
+                                        user["user_id"],
+                                        "follow_up_reminder",
+                                        [user.get("user_name", "")]
+                                    )
+                                    mark_follow_up_sent(user["user_id"])
+                                    logger.info(f"WhatsApp template follow-up sent to {user['user_id']} ({hours}h)")
+                                except Exception as tmpl_err:
+                                    logger.warning(f"Template send failed for {user['user_id']}: {tmpl_err}")
+                                    mark_follow_up_sent(user["user_id"])
+                            else:
+                                logger.info(f"No WhatsApp template func - skipping {user['user_id']}")
                                 mark_follow_up_sent(user["user_id"])
                         else:
                             # Outside all messaging windows — mark as done
