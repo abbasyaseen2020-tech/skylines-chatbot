@@ -207,9 +207,9 @@ def ask_ai(user_id, user_message, platform="messenger"):
     msg_count = len(conversation_history[user_id])
 
     if is_first:
-        system_prompt += "\n\n## ⚠️ أول رسالة — عرّفي نفسك (أسيل من Sky Lines) مرة واحدة بس."
+        system_prompt += "\n\n## ⚠️ أول رسالة — رحبي بالعميل كفريق Sky Lines. ممنوع تذكري أي اسم شخصي."
     else:
-        system_prompt += "\n\n## ⚠️ محادثة مكملة — ممنوع تقولي اسمك. ردي مباشر."
+        system_prompt += "\n\n## ⚠️ محادثة مكملة — ردي مباشر ومختصر."
 
     has_phone = bool(user_data.get(user_id, {}).get("phone"))
     asked_phone = phone_requested.get(user_id, False)
@@ -275,7 +275,7 @@ def ask_ai_comment(comment_text, sender_name):
 - رحبي بالعميل باسمه
 - وجهيه يبعتلنا رسالة خاصة
 - ممنوع أسعار أو أرقام
-- ممنوع تقولي اسمك "أسيل"
+- ممنوع تذكري أي اسم شخصي — ردي كفريق Sky Lines
 - ممنوع تطلبي رقم تليفون
 """
 
@@ -289,13 +289,12 @@ def ask_ai_comment(comment_text, sender_name):
 
 
 def _post_process(user_id, response, is_first):
-    if not is_first:
-        response = re.sub(r'أنا\s*أسيل[^.!؟\n]*[.!؟]?\s*', '', response)
-        response = re.sub(r'أسيل\s*هنا[^.!؟\n]*[.!؟]?\s*', '', response)
-        response = re.sub(r'أسيل\s*من\s*Sky\s*Lines[^.!؟\n]*[.!؟]?\s*', '', response)
-        response = re.sub(r'معاكِ?\s*أسيل[^.!؟\n]*[.!؟]?\s*', '', response)
-        response = re.sub(r'^(أهلاً?\s*(بيك|وسهلاً?)?!?\s*🏢?\s*)', '', response)
-        response = re.sub(r'^(مرحبا!?\s*)', '', response)
+    # Always strip the name — never allow it
+    response = re.sub(r'أنا\s*أسيل[^.!؟\n]*[.!؟]?\s*', '', response)
+    response = re.sub(r'أسيل\s*هنا[^.!؟\n]*[.!؟]?\s*', '', response)
+    response = re.sub(r'أسيل\s*من\s*Sky\s*Lines[^.!؟\n]*[.!؟]?\s*', '', response)
+    response = re.sub(r'معاكِ?\s*أسيل[^.!؟\n]*[.!؟]?\s*', '', response)
+    response = re.sub(r'أسيل', '', response)
 
     lines = response.strip().split('\n')
     has_card = any('🟢' in l or '💰' in l or '━' in l for l in lines)
