@@ -30,6 +30,8 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
+FB_APP_ID = os.getenv("FB_APP_ID", "1158857492390878")
+FB_APP_SECRET = os.getenv("FB_APP_SECRET", "")
 
 # ---- AI Provider Auto-Detection ----
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -687,6 +689,124 @@ def api_subscribe():
     # GET — just show current status
     status = check_subscription_status()
     return jsonify({"current_status": status})
+
+
+@app.route("/api/exchange-token", methods=["GET", "POST"])
+def exchange_token():
+    """
+    Exchange a short-lived token for a PERMANENT Page Access Token.
+    Usage: /api/exchange-token?token=SHORT_LIVED_TOKEN
+
+    Steps:
+    1. Exchange short-lived User Token → Long-lived User Token
+    2. Use long-lived User Token → Get permanent Page Token
+    3. Update PAGE_ACCESS_TOKEN in memory + re-subscribe
+    """
+    global PAGE_ACCESS_TOKEN
+
+    short_token = request.args.get("token") or request.form.get("token")
+    if not short_token:
+        return jsonify({
+            "error": "Missing 'token' parameter",
+            "usage": "GET /api/exchange-token?token=YOUR_SHORT_LIVED_TOKEN",
+            "instructions": [
+                "1. Go to https://developers.facebook.com/tools/explorer/",
+                "2. Select your App (n8nSetup)",
+                "3. Click 'Generate Access Token' with permissions: pages_manage_metadata, pages_messaging, pages_manage_engagement, pages_read_engagement",
+                "4. Copy the token and paste it in the URL above",
+            ]
+        }), 400
+
+    if not FB_APP_SECRET:
+        return jsonify({
+            "error": "FB_APP_SECRET not set",
+            "fix": "Add FB_APP_SECRET environment variable on Railway"
+        }), 500
+
+    try:
+        # Step 1: Exchange short-lived → long-lived User Token
+        logger.info("🔄 Step 1: Exchanging short-lived token for long-lived...")
+        exchange_resp = requests.get(
+            f"{GRAPH_API_URL}/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": FB_APP_ID,
+                "client_secret": FB_APP_SECRET,
+                "fb_exchange_token": short_token
+            },
+            timeout=15
+        )
+        exchange_data = exchange_resp.json()
+
+        if "error" in exchange_data:
+            return jsonify({
+                "step": "1 - Exchange for long-lived token",
+                "error": exchange_data["error"]
+            }), 400
+
+        long_lived_user_token = exchange_data.get("access_token")
+        expires_in = exchange_data.get("expires_in", "unknown")
+        logger.info(f"✅ Got long-lived user token (expires_in: {expires_in}s)")
+
+        # Step 2: Get permanent Page Access Token
+        logger.info("🔄 Step 2: Getting permanent Page Access Token...")
+        pages_resp = requests.get(
+            f"{GRAPH_API_URL}/me/accounts",
+            params={"access_token": long_lived_user_token},
+            timeout=15
+        )
+        pages_data = pages_resp.json()
+
+        if "error" in pages_data:
+            return jsonify({
+                "step": "2 - Get page token",
+                "error": pages_data["error"],
+                "long_lived_user_token": long_lived_user_token[:20] + "..."
+            }), 400
+
+        # Find the Sky Lines page
+        pages = pages_data.get("data", [])
+        page_token = None
+        page_name = None
+        for page in pages:
+            if page.get("id") == "106168341445922":
+                page_token = page.get("access_token")
+                page_name = page.get("name")
+                break
+
+        # If not found by ID, take the first page
+        if not page_token and pages:
+            page_token = pages[0].get("access_token")
+            page_name = pages[0].get("name")
+
+        if not page_token:
+            return jsonify({
+                "step": "2 - No page found",
+                "error": "No pages found for this user",
+                "pages_data": pages_data
+            }), 400
+
+        # Step 3: Update in memory and re-subscribe
+        PAGE_ACCESS_TOKEN = page_token
+        logger.info(f"✅ Got permanent Page Token for: {page_name}")
+
+        # Re-subscribe with new token
+        sub_result = subscribe_page_feed()
+        logger.info(f"🔄 Re-subscription result: {sub_result}")
+
+        return jsonify({
+            "success": True,
+            "message": f"✅ Permanent Page Token obtained for '{page_name}'!",
+            "page_name": page_name,
+            "token_preview": page_token[:20] + "...",
+            "permanent_token": page_token,
+            "subscription": sub_result,
+            "next_step": "⚠️ IMPORTANT: Copy the 'permanent_token' value and update PAGE_ACCESS_TOKEN on Railway to persist across restarts!"
+        })
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Token exchange error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/diagnose", methods=["GET"])
