@@ -371,7 +371,7 @@ def fallback_response(message):
     if any(w in text for w in ["حجز", "موعد", "زيارة", "معاينة"]):
         return "تقدر تتواصل معانا على 01055993391 📞 وهنرتب معاك!"
     if any(w in text for w in ["رقم", "تواصل", "تليفون", "واتساب", "فون", "اتصال"]):
-        return "📞 01055993391\n🌐 www.skylinesdevelopments.com\nتواصل معانا في أي وقت!"
+        return "📞 01055993391\n📧 info@skylinesdevelopments.com\n🌐 www.skylinesdevelopments.com\nتواصل معانا في أي وقت!"
     return "أهلاً بيك! 🏢 إيه اللي تحب تعرفه عن مشاريعنا؟"
 
 
@@ -655,17 +655,30 @@ def api_subscribe():
 # ============================================
 # REPLY TO OLD COMMENTS
 # ============================================
+WELCOME_DM = (
+    "أهلاً بيك! 👋😊\n"
+    "شكراً لاهتمامك بـ Sky Lines\n\n"
+    "لو عايز تعرف أكتر عن مشاريعنا أو عندك أي استفسار، "
+    "ابعتلنا هنا وهنرد عليك فوراً! 🏢\n\n"
+    "📞 01055993391\n"
+    "📧 info@skylinesdevelopments.com\n"
+    "🌐 www.skylinesdevelopments.com\n"
+    "في خدمتك دايماً! ❤️"
+)
+
+
 @app.route("/api/reply-old-comments", methods=["POST"])
 def reply_old_comments():
-    """Fetch recent posts and reply to unanswered comments."""
+    """Fetch recent posts and reply to unanswered comments + send welcome DM."""
     if not PAGE_ACCESS_TOKEN:
         return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
 
-    days = int(request.args.get("days", 30))
+    days = int(request.args.get("days", 3))
     dry_run = request.args.get("dry_run", "false").lower() == "true"
     since = int(time.time()) - (days * 86400)
 
     replied = 0
+    dms_sent = 0
     skipped = 0
     errors = 0
 
@@ -735,9 +748,18 @@ def reply_old_comments():
                     else:
                         resp = f"أهلاً يا {c_sender_name}! 😊 لو محتاج معلومات ابعتلنا رسالة خاصة!"
 
+                    # 1) Reply on the comment publicly
                     reply_to_comment(c_id, resp)
                     replied += 1
-                    time.sleep(1)  # Rate limit protection
+
+                    # 2) Send welcome DM with company info
+                    try:
+                        send_private_reply(c_id, WELCOME_DM)
+                        dms_sent += 1
+                    except Exception as e:
+                        logger.warning(f"DM failed for {c_id} (may not be eligible): {e}")
+
+                    time.sleep(1.5)  # Rate limit protection
 
                 except Exception as e:
                     logger.error(f"Reply error for {c_id}: {e}")
@@ -749,6 +771,7 @@ def reply_old_comments():
 
     return jsonify({
         "replied": replied,
+        "dms_sent": dms_sent,
         "skipped": skipped,
         "errors": errors,
         "dry_run": dry_run,

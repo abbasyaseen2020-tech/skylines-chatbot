@@ -389,6 +389,8 @@ COMPANY_INFO = {
     "ceo_title": "المؤسس والرئيس التنفيذي",
     "ceo_name": "عباس يسن",
     "phone": "01055993391",
+    "email": "info@skylinesdevelopments.com",
+    "website": "www.skylinesdevelopments.com",
     "reply_scope": "المعلومات الأساسية عن الشركة ومشروعاتها فقط",
     "privacy_rule": "عدم تقديم معلومات شخصية أو داخلية أو حساسة",
 }
