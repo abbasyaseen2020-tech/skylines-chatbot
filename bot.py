@@ -621,8 +621,147 @@ def health_check():
 
 
 # ============================================
+# PAGE SUBSCRIPTION (for comment auto-replies)
+# ============================================
+def subscribe_page_feed():
+    """Subscribe the page to 'feed' and 'messages' webhooks."""
+    if not PAGE_ACCESS_TOKEN:
+        logger.warning("No PAGE_ACCESS_TOKEN — skipping feed subscription")
+        return False
+    url = f"{GRAPH_API_URL}/me/subscribed_apps"
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    payload = {"subscribed_fields": "feed,messages"}
+    try:
+        r = requests.post(url, params=params, data=payload, timeout=10)
+        result = r.json()
+        if result.get("success"):
+            logger.info("✅ Page subscribed to feed + messages")
+            return True
+        else:
+            logger.error(f"Subscribe failed: {result}")
+            return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Subscribe error: {e}")
+        return False
+
+
+@app.route("/api/subscribe", methods=["POST"])
+def api_subscribe():
+    """Manually trigger page feed subscription."""
+    ok = subscribe_page_feed()
+    return jsonify({"success": ok})
+
+
+# ============================================
+# REPLY TO OLD COMMENTS
+# ============================================
+@app.route("/api/reply-old-comments", methods=["POST"])
+def reply_old_comments():
+    """Fetch recent posts and reply to unanswered comments."""
+    if not PAGE_ACCESS_TOKEN:
+        return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+
+    days = int(request.args.get("days", 30))
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+    since = int(time.time()) - (days * 86400)
+
+    replied = 0
+    skipped = 0
+    errors = 0
+
+    try:
+        # Get page posts
+        posts_url = f"{GRAPH_API_URL}/me/posts"
+        posts_params = {"access_token": PAGE_ACCESS_TOKEN, "fields": "id,created_time", "since": since, "limit": 50}
+        posts_resp = requests.get(posts_url, params=posts_params, timeout=15)
+        posts_data = posts_resp.json()
+
+        page_id_resp = requests.get(f"{GRAPH_API_URL}/me", params={"access_token": PAGE_ACCESS_TOKEN, "fields": "id"}, timeout=10)
+        page_id = page_id_resp.json().get("id", "")
+
+        for post in posts_data.get("data", []):
+            post_id = post["id"]
+
+            # Get comments on this post
+            comments_url = f"{GRAPH_API_URL}/{post_id}/comments"
+            comments_params = {"access_token": PAGE_ACCESS_TOKEN, "fields": "id,message,from,created_time", "limit": 100}
+            comments_resp = requests.get(comments_url, params=comments_params, timeout=15)
+            comments_data = comments_resp.json()
+
+            for comment in comments_data.get("data", []):
+                c_id = comment["id"]
+                c_from = comment.get("from", {})
+                c_sender_id = c_from.get("id", "")
+                c_sender_name = c_from.get("name", "")
+                c_text = comment.get("message", "")
+
+                # Skip page's own comments
+                if c_sender_id == page_id:
+                    skipped += 1
+                    continue
+
+                # Check if already replied (look for page reply in sub-comments)
+                replies_url = f"{GRAPH_API_URL}/{c_id}/comments"
+                replies_params = {"access_token": PAGE_ACCESS_TOKEN, "fields": "from", "limit": 10}
+                replies_resp = requests.get(replies_url, params=replies_params, timeout=10)
+                replies_data = replies_resp.json()
+
+                already_replied = any(r.get("from", {}).get("id") == page_id for r in replies_data.get("data", []))
+                if already_replied:
+                    skipped += 1
+                    continue
+
+                # Generate reply
+                if dry_run:
+                    replied += 1
+                    logger.info(f"[DRY RUN] Would reply to {c_id}: {c_text[:50]}")
+                    continue
+
+                try:
+                    # Use the same comment handling logic
+                    is_positive = (
+                        any(e in c_text for e in EMOJI_POSITIVE) or
+                        any(w in c_text for w in THANK_WORDS)
+                    )
+
+                    if is_positive and not any(k in c_text for k in COMMENT_KEYWORDS):
+                        if any(e in c_text for e in EMOJI_POSITIVE) and len(c_text.strip()) <= 5:
+                            resp = random.choice(EMOJI_RESPONSES)
+                        else:
+                            resp = f"شكراً ليك يا {c_sender_name}! نورتنا 🙏❤️"
+                    elif any(k in c_text for k in COMMENT_KEYWORDS):
+                        ai_reply = ask_ai_comment(c_text, c_sender_name)
+                        resp = ai_reply or f"أهلاً يا {c_sender_name}! 👋 ابعتلنا رسالة خاصة وهنرد عليك 😊"
+                    else:
+                        resp = f"أهلاً يا {c_sender_name}! 😊 لو محتاج معلومات ابعتلنا رسالة خاصة!"
+
+                    reply_to_comment(c_id, resp)
+                    replied += 1
+                    time.sleep(1)  # Rate limit protection
+
+                except Exception as e:
+                    logger.error(f"Reply error for {c_id}: {e}")
+                    errors += 1
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Fetch posts error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "replied": replied,
+        "skipped": skipped,
+        "errors": errors,
+        "dry_run": dry_run,
+        "days": days,
+    })
+
+
+# ============================================
 # MAIN
 # ============================================
+# Subscribe to page feed on startup
+subscribe_page_feed()
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     if AI_PROVIDER == "fallback":
