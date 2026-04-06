@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Sky Lines Real Estate - AI Agent
-=================================
+Sky Lines Real Estate - AI Sales Agent
+=======================================
 Facebook Messenger + WhatsApp + Facebook Comments
-Powered by Flask + Anthropic Claude API + Facebook Graph API + WhatsApp Business API
+Auto-detects OpenAI or Anthropic API
 """
 
 import os
 import re
-import json
 import logging
 import time
+import random
 import requests
 from datetime import datetime
 from collections import defaultdict
@@ -30,10 +30,25 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
+
+# ---- AI Provider Auto-Detection ----
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-20250514")
+
+if OPENAI_API_KEY:
+    AI_PROVIDER = "openai"
+    _DEFAULT_MODEL = "gpt-4.1-mini"
+elif ANTHROPIC_API_KEY:
+    AI_PROVIDER = "anthropic"
+    _DEFAULT_MODEL = "claude-sonnet-4-20250514"
+else:
+    AI_PROVIDER = "fallback"
+    _DEFAULT_MODEL = "none"
+
+AI_MODEL = os.getenv("AI_MODEL", _DEFAULT_MODEL)
 
 GRAPH_API_URL = "https://graph.facebook.com/v19.0"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2025-01-01"
 
@@ -81,7 +96,7 @@ def is_duplicate_comment(comment_id):
 
 
 # ============================================
-# SANITIZE HISTORY (Claude requires alternating roles)
+# SANITIZE HISTORY (alternating user/assistant)
 # ============================================
 def sanitize_history(history):
     if not history:
@@ -109,11 +124,60 @@ def sanitize_history(history):
 
 
 # ============================================
+# AI API CALLS
+# ============================================
+def _call_openai(system_prompt, messages, max_tokens):
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": AI_MODEL,
+        "messages": [{"role": "system", "content": system_prompt}] + messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+    }
+    resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=25)
+    if resp.status_code != 200:
+        logger.error(f"OpenAI {resp.status_code}: {resp.text[:500]}")
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _call_anthropic(system_prompt, messages, max_tokens):
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": AI_MODEL,
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+        "system": system_prompt,
+        "messages": messages,
+    }
+    resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=25)
+    if resp.status_code != 200:
+        logger.error(f"Anthropic {resp.status_code}: {resp.text[:500]}")
+    resp.raise_for_status()
+    return resp.json()["content"][0]["text"]
+
+
+def _call_ai(system_prompt, messages, max_tokens=150):
+    if AI_PROVIDER == "openai":
+        return _call_openai(system_prompt, messages, max_tokens)
+    elif AI_PROVIDER == "anthropic":
+        return _call_anthropic(system_prompt, messages, max_tokens)
+    return None
+
+
+# ============================================
 # AI AGENT
 # ============================================
 def ask_ai(user_id, user_message, platform="messenger"):
-    if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set")
+    if AI_PROVIDER == "fallback":
+        logger.warning("No AI API key set — fallback mode")
         return fallback_response(user_message)
 
     conversation_history[user_id].append({"role": "user", "content": user_message})
@@ -125,137 +189,100 @@ def ask_ai(user_id, user_message, platform="messenger"):
     if not clean_history:
         clean_history = [{"role": "user", "content": user_message}]
 
-    # Build system prompt
     system_prompt = get_system_prompt()
 
     # User context
     if user_id in user_data:
         data = user_data[user_id]
         if data.get("name"):
-            ctx = f"\n[معلومات العميل: الاسم: {data['name']}"
+            ctx = f"\n[الاسم: {data['name']}"
             if data.get("phone"):
-                ctx += f"، التليفون: {data['phone']}"
+                ctx += f", التليفون: {data['phone']}"
             if data.get("interest"):
-                ctx += f"، مهتم بـ: {data['interest']}"
+                ctx += f", مهتم بـ: {data['interest']}"
             ctx += "]"
-            system_prompt += f"\n\n## معلومات العميل الحالي:{ctx}"
+            system_prompt += f"\n\n## العميل الحالي:{ctx}"
 
-    # First message detection
     is_first = len(conversation_history[user_id]) <= 1
     msg_count = len(conversation_history[user_id])
 
     if is_first:
-        system_prompt += "\n\n## ⚠️ ده أول رسالة — عرّفي نفسك (أسيل من Sky Lines) مرة واحدة بس."
+        system_prompt += "\n\n## ⚠️ أول رسالة — عرّفي نفسك (أسيل من Sky Lines) مرة واحدة بس."
     else:
-        system_prompt += "\n\n## ⚠️ المحادثة مكملة — ممنوع تقولي اسمك أو تعرّفي نفسك. ردي مباشر ومختصر."
+        system_prompt += "\n\n## ⚠️ محادثة مكملة — ممنوع تقولي اسمك. ردي مباشر."
 
-    # Phone request throttling
     has_phone = bool(user_data.get(user_id, {}).get("phone"))
     asked_phone = phone_requested.get(user_id, False)
 
     if has_phone:
         system_prompt += "\n## العميل ساب رقمه — ماتطلبيش تاني."
     elif asked_phone:
-        system_prompt += "\n## ⛔ طلبتي الرقم قبل كده — ممنوع تطلبيه تاني."
+        system_prompt += "\n## ⛔ طلبتي الرقم قبل كده — ممنوع تطلبيه تاني. اديله بيانات الشركة لو عايز يتواصل."
     elif msg_count < 4:
-        system_prompt += f"\n## ⛔ رسالة رقم {msg_count} — بدري على طلب الرقم."
+        system_prompt += f"\n## ⛔ رسالة {msg_count} — بدري على طلب الرقم."
 
     system_prompt += f"\n\n## المنصة: {platform}"
     if platform == "whatsapp":
         system_prompt += "\n(واتساب — ردود أقصر)"
 
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-
-    payload = {
-        "model": AI_MODEL,
-        "max_tokens": 200,
-        "temperature": 0.7,
-        "system": system_prompt,
-        "messages": clean_history,
-    }
-
     try:
-        response = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=30)
-        if response.status_code != 200:
-            logger.error(f"Claude API {response.status_code}: {response.text[:500]}")
-        response.raise_for_status()
-        result = response.json()
-        ai_response = result["content"][0]["text"]
+        ai_response = _call_ai(system_prompt, clean_history, max_tokens=150)
+        if not ai_response:
+            fb = fallback_response(user_message)
+            conversation_history[user_id].append({"role": "assistant", "content": fb})
+            return fb
 
-        # Post-process
         ai_response = _post_process(user_id, ai_response, is_first)
-
         conversation_history[user_id].append({"role": "assistant", "content": ai_response})
         extract_user_data(user_id, user_message, ai_response)
 
-        # Track phone requests
         phone_patterns = ["رقم حضرتك", "رقم تليفون", "رقم موبايل", "رقمك",
                           "ابعتلي رقم", "ابعتلنا رقم", "سيب رقمك",
                           "واتساب ولا مكالمة", "يكلمك", "يتواصل مع حضرتك", "نمبرك"]
         if any(p in ai_response for p in phone_patterns):
             phone_requested[user_id] = True
 
-        logger.info(f"AI [{user_id}]: {ai_response[:100]}...")
+        logger.info(f"[{AI_PROVIDER}] {user_id}: {ai_response[:100]}...")
         return ai_response
 
     except requests.exceptions.Timeout:
-        logger.error("Claude API timeout")
+        logger.error(f"{AI_PROVIDER} timeout")
         fb = "عذراً، حصل تأخير بسيط. ممكن تبعت رسالتك تاني؟ 🙏"
         conversation_history[user_id].append({"role": "assistant", "content": fb})
         return fb
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Claude API error: {e}")
+        logger.error(f"{AI_PROVIDER} error: {e}")
         fb = fallback_response(user_message)
         conversation_history[user_id].append({"role": "assistant", "content": fb})
         return fb
 
     except (KeyError, IndexError) as e:
-        logger.error(f"Unexpected API response: {e}")
+        logger.error(f"API response parse error: {e}")
         fb = fallback_response(user_message)
         conversation_history[user_id].append({"role": "assistant", "content": fb})
         return fb
 
 
 def ask_ai_comment(comment_text, sender_name):
-    if not ANTHROPIC_API_KEY:
+    if AI_PROVIDER == "fallback":
         return None
 
-    system_prompt = get_system_prompt()
-    system_prompt += """
+    system_prompt = get_system_prompt() + """
 
 ## رد على تعليق فيسبوك (عام)
 - سطر واحد — 15 كلمة ماكس
 - رحبي بالعميل باسمه
 - وجهيه يبعتلنا رسالة خاصة
 - ممنوع أسعار أو أرقام
-- ممنوع تقولي اسمك "أسيل" — ردي كصفحة الشركة
+- ممنوع تقولي اسمك "أسيل"
 - ممنوع تطلبي رقم تليفون
 """
 
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": AI_MODEL,
-        "max_tokens": 100,
-        "temperature": 0.7,
-        "system": system_prompt,
-        "messages": [{"role": "user", "content": f"العميل {sender_name} علّق: \"{comment_text}\"\nرد مختصر للتعليقات العامة."}],
-    }
-
     try:
-        response = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=15)
-        if response.status_code != 200:
-            logger.error(f"Comment API {response.status_code}: {response.text[:500]}")
-        response.raise_for_status()
-        return response.json()["content"][0]["text"]
+        return _call_ai(system_prompt,
+                        [{"role": "user", "content": f"العميل {sender_name} علّق: \"{comment_text}\"\nرد مختصر."}],
+                        max_tokens=80)
     except Exception as e:
         logger.error(f"Comment AI error: {e}")
         return None
@@ -271,7 +298,7 @@ def _post_process(user_id, response, is_first):
         response = re.sub(r'^(مرحبا!?\s*)', '', response)
 
     lines = response.strip().split('\n')
-    has_card = any('🟢' in l or '💰' in l or '━' in l or '🏢' in l for l in lines)
+    has_card = any('🟢' in l or '💰' in l or '━' in l for l in lines)
     max_lines = 12 if has_card else 5
     if len(lines) > max_lines:
         response = '\n'.join(lines[:max_lines])
@@ -299,10 +326,14 @@ def extract_user_data(user_id, user_message, ai_response):
                 user_data[user_id]["name"] = text
 
     interests = []
-    if any(w in text for w in ["شقة", "شقق", "سكني"]): interests.append("شقق سكنية")
-    if any(w in text for w in ["فيلا", "فيلات"]): interests.append("فيلات")
-    if any(w in text for w in ["محل", "تجاري"]): interests.append("محلات تجارية")
-    if any(w in text for w in ["مكتب", "إداري"]): interests.append("مكاتب إدارية")
+    if any(w in text for w in ["شقة", "شقق", "سكني"]):
+        interests.append("شقق سكنية")
+    if any(w in text for w in ["فيلا", "فيلات"]):
+        interests.append("فيلات")
+    if any(w in text for w in ["محل", "تجاري"]):
+        interests.append("محلات تجارية")
+    if any(w in text for w in ["مكتب", "إداري"]):
+        interests.append("مكاتب إدارية")
     if interests:
         user_data[user_id]["interest"] = "، ".join(interests)
 
@@ -321,13 +352,12 @@ def auto_save_lead(user_id):
     data = user_data.get(user_id, {})
     if data.get("name") and data.get("phone"):
         if not any(l.get("phone") == data["phone"] for l in leads_db):
-            lead = {
+            leads_db.append({
                 "name": data["name"], "phone": data["phone"],
                 "interest": data.get("interest", "غير محدد"),
                 "platform": "auto", "timestamp": datetime.now().isoformat(),
                 "user_id": user_id,
-            }
-            leads_db.append(lead)
+            })
             logger.info(f"Lead saved: {data['name']} - {data['phone']}")
 
 
@@ -340,7 +370,9 @@ def fallback_response(message):
     if any(w in text for w in ["مشاريع", "شقة", "شقق", "فيلا", "فيلات", "محل", "مكتب"]):
         return "عندنا مشاريع في بني سويف — سكني وتجاري وإداري. حضرتك بتدور على إيه؟"
     if any(w in text for w in ["حجز", "موعد", "زيارة", "معاينة"]):
-        return "تحب التواصل يكون واتساب ولا مكالمة تليفون؟ 😊"
+        return "تقدر تتواصل معانا على 01055993391 📞 وهنرتب معاك!"
+    if any(w in text for w in ["رقم", "تواصل", "تليفون", "واتساب", "فون", "اتصال"]):
+        return "📞 01055993391\n🌐 www.skylinesdevelopments.com\nتواصل معانا في أي وقت!"
     return "أهلاً بيك! 🏢 إيه اللي تحب تعرفه عن مشاريعنا؟"
 
 
@@ -374,7 +406,6 @@ def handle_comment(comment_data):
     if is_duplicate_comment(comment_id):
         return
 
-    # Skip page's own comments
     page_id = post_id.split("_")[0] if post_id else ""
     if sender_id == page_id:
         return
@@ -385,7 +416,6 @@ def handle_comment(comment_data):
     )
 
     if is_positive and not any(k in comment_text for k in COMMENT_KEYWORDS):
-        import random
         if any(e in comment_text for e in EMOJI_POSITIVE) and len(comment_text.strip()) <= 5:
             resp = random.choice(EMOJI_RESPONSES)
         else:
@@ -439,7 +469,7 @@ def reply_to_comment(comment_id, text):
         r = requests.post(url, data={"message": text}, params={"access_token": PAGE_ACCESS_TOKEN}, timeout=10)
         result = r.json()
         if "error" in result:
-            logger.error(f"Comment reply error {comment_id}: {result['error']}")
+            logger.error(f"Comment reply error: {result['error']}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Comment reply failed: {e}")
 
@@ -584,10 +614,10 @@ def get_stats():
 def health_check():
     return jsonify({
         "status": "running",
-        "ai": "configured" if ANTHROPIC_API_KEY else "fallback",
+        "ai_provider": AI_PROVIDER,
+        "ai_model": AI_MODEL,
         "facebook": "configured" if PAGE_ACCESS_TOKEN else "off",
         "whatsapp": "configured" if WHATSAPP_TOKEN else "off",
-        "model": AI_MODEL,
     })
 
 
@@ -596,9 +626,9 @@ def health_check():
 # ============================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set — using fallback responses")
+    if AI_PROVIDER == "fallback":
+        logger.warning("⚠️ No AI key — set OPENAI_API_KEY or ANTHROPIC_API_KEY")
     else:
-        logger.info(f"AI Engine: {AI_MODEL}")
+        logger.info(f"AI: {AI_PROVIDER} / {AI_MODEL}")
     logger.info(f"Starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=True)
