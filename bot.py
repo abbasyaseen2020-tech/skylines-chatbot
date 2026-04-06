@@ -44,6 +44,7 @@ WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-20250514")
+ANTHROPIC_VERSION = "2025-01-01"
 GRAPH_API_URL = "https://graph.facebook.com/v19.0"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
@@ -60,6 +61,7 @@ from knowledge_base import (
 leads_db = []
 conversation_history = defaultdict(list)
 user_data = {}
+phone_requested = {}  # Track if phone was already requested per user
 MAX_HISTORY = 20
 
 # ============================================
@@ -135,10 +137,13 @@ def ask_ai(user_id, user_message, platform="messenger"):
     if user_context:
         system_prompt += f"\n\n## معلومات العميل الحالي:{user_context}"
 
-    # Add conversation summary for returning users
-    conv_summary = conversation_store.get_conversation_summary(user_id)
-    if conv_summary:
-        system_prompt += conv_summary
+    # Detect if this is the first message (new user) or returning user
+    is_first_message = len(conversation_history[user_id]) <= 1
+    msg_count = len(conversation_history[user_id])
+
+    # Add conversation context note for returning users
+    if not is_first_message:
+        system_prompt += "\n\n## العميل ده كلمنا قبل كده — كملي المحادثة من حيث ما وقفت. ماتسأليش أسئلة اتسألت قبل كده."
 
     system_prompt += f"\n\n## المنصة الحالية: {platform}"
     if platform == "whatsapp":
@@ -146,13 +151,30 @@ def ask_ai(user_id, user_message, platform="messenger"):
 
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2025-01-01",
+        "anthropic-version": ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
 
+    if is_first_message:
+        system_prompt += "\n\n## ⚠️ ده أول رسالة من العميل — عرّفي نفسك (أسيل من Sky Lines) مرة واحدة بس."
+    else:
+        system_prompt += "\n\n## ⚠️ المحادثة مكملة — ممنوع نهائياً تقولي اسمك أو تعرّفي نفسك. ردي مباشر ومختصر."
+
+    # Phone request tracking
+    already_has_phone = bool(user_data.get(user_id, {}).get("phone"))
+    already_asked_phone = phone_requested.get(user_id, False)
+
+    if already_has_phone:
+        system_prompt += "\n## ℹ️ العميل ده ساب رقمه بالفعل — ماتطلبيش رقم تاني."
+    elif already_asked_phone:
+        system_prompt += "\n## ⛔ طلبتي رقم التليفون قبل كده — ممنوع تطلبيه تاني نهائياً. كملي المحادثة عادي."
+    elif msg_count < 4:
+        system_prompt += f"\n## ⛔ ده لسه رسالة رقم {msg_count} — بدري على طلب رقم التليفون. ماتطلبيش دلوقتي."
+
     payload = {
         "model": AI_MODEL,
-        "max_tokens": 500,
+        "max_tokens": 200,
+        "temperature": 0.7,
         "system": system_prompt,
         "messages": conversation_history[user_id],
     }
@@ -164,10 +186,16 @@ def ask_ai(user_id, user_message, platform="messenger"):
             json=payload,
             timeout=30
         )
+        if response.status_code != 200:
+            error_body = response.text[:500]
+            logger.error(f"Claude API error {response.status_code}: {error_body}")
         response.raise_for_status()
         result = response.json()
 
         ai_response = result["content"][0]["text"]
+
+        # Post-process: enforce rules the AI might break
+        ai_response = _post_process_response(user_id, ai_response, is_first_message)
 
         conversation_history[user_id].append({
             "role": "assistant",
@@ -178,6 +206,16 @@ def ask_ai(user_id, user_message, platform="messenger"):
         conversation_store.save_message(user_id, platform, "assistant", ai_response)
 
         extract_user_data(user_id, user_message, ai_response)
+
+        # Track if the AI asked for phone number (specific patterns only)
+        phone_ask_patterns = [
+            "رقم حضرتك", "رقم تليفون", "رقم موبايل", "رقمك",
+            "ابعتلي رقم", "ابعتلنا رقم", "سيب رقمك",
+            "واتساب ولا مكالمة", "يكلمك", "يتواصل مع حضرتك",
+            "يكلم حضرتك", "نمبرك"
+        ]
+        if any(p in ai_response for p in phone_ask_patterns):
+            phone_requested[user_id] = True
 
         logger.info(f"AI response for {user_id}: {ai_response[:100]}...")
         return ai_response
@@ -203,18 +241,17 @@ def ask_ai_comment(comment_text, sender_name):
     system_prompt += """
 
 ## سياق خاص: رد على تعليق فيسبوك (عام — كل الناس بتشوفه)
-- الرد لازم يكون سطر واحد أو اتنين بالكتير
-- رحبي بالعميل باسمه بشكل لطيف
-- أجيبي على سؤاله بشكل مختصر جداً
-- وجهيه يبعت رسالة خاصة للتفاصيل: "ابعتلنا رسالة وهنرد عليك بكل التفاصيل 😊"
-- ممنوع تذكري أسعار أو أرقام في التعليقات العامة
-- ممنوع تذكري اسمك "أسيل" — ردي كصفحة الشركة مباشرة
-- ممنوع تطلبي رقم تليفون في التعليقات
+- سطر واحد بس — 15 كلمة ماكس
+- رحبي بالعميل باسمه
+- وجهيه يبعتلنا رسالة خاصة: "ابعتلنا رسالة وهنرد عليك 😊"
+- ممنوع أسعار أو أرقام في التعليقات
+- ممنوع تقولي اسمك "أسيل" نهائياً — ردي كصفحة الشركة
+- ممنوع تطلبي رقم تليفون
 """
 
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2025-01-01",
+        "anthropic-version": ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
 
@@ -225,7 +262,8 @@ def ask_ai_comment(comment_text, sender_name):
 
     payload = {
         "model": AI_MODEL,
-        "max_tokens": 200,
+        "max_tokens": 100,
+        "temperature": 0.7,
         "system": system_prompt,
         "messages": messages,
     }
@@ -237,6 +275,9 @@ def ask_ai_comment(comment_text, sender_name):
             json=payload,
             timeout=15
         )
+        if response.status_code != 200:
+            error_body = response.text[:500]
+            logger.error(f"AI comment API error {response.status_code}: {error_body}")
         response.raise_for_status()
         result = response.json()
         return result["content"][0]["text"]
@@ -267,7 +308,7 @@ def extract_user_data(user_id, user_message, ai_response):
     interests = []
     if any(w in text for w in ["شقة", "شقق", "سكني"]):
         interests.append("شقق سكنية")
-    if any(w in text for w in ["فيلإ", "فيلات"]):
+    if any(w in text for w in ["فيلا", "فيلات"]):
         interests.append("فيلات")
     if any(w in text for w in ["محل", "تجاري"]):
         interests.append("محلات تجارية")
@@ -311,14 +352,42 @@ def auto_save_lead(user_id):
             logger.info(f"Auto-saved lead: {data['name']} - {data['phone']}")
 
 
+def _post_process_response(user_id, response, is_first_message):
+    """Enforce response rules that the AI might break."""
+    import re
+
+    # 1. Remove name mentions if not first message
+    if not is_first_message:
+        response = re.sub(r'أنا\s*أسيل[^.!؟\n]*[.!؟]?\s*', '', response)
+        response = re.sub(r'أسيل\s*هنا[^.!؟\n]*[.!؟]?\s*', '', response)
+        response = re.sub(r'أسيل\s*من\s*Sky\s*Lines[^.!؟\n]*[.!؟]?\s*', '', response)
+        response = re.sub(r'معاكِ?\s*أسيل[^.!؟\n]*[.!؟]?\s*', '', response)
+        response = re.sub(r'أسيل\s*معاك[^.!؟\n]*[.!؟]?\s*', '', response)
+
+    # 2. Remove duplicate greetings after first message
+    if not is_first_message:
+        response = re.sub(r'^(أهلاً?\s*(بيك|وسهلاً?)?!?\s*🏢?\s*)', '', response)
+        response = re.sub(r'^(مرحبا!?\s*)', '', response)
+
+    # 3. Trim excessively long responses
+    lines = response.strip().split('\n')
+    has_card = any('🟢' in line or '💰' in line or '━' in line for line in lines)
+    max_lines = 12 if has_card else 5
+    if len(lines) > max_lines:
+        response = '\n'.join(lines[:max_lines])
+
+    # 4. Clean up whitespace
+    response = re.sub(r'\n{3,}', '\n\n', response)
+    response = response.strip()
+
+    return response
+
+
 def fallback_response(message):
     text = message.lower().strip()
 
     if any(w in text for w in ["سلام", "هاي", "مرحبا", "صباح", "مساء", "اهلا", "أهلا", "هلو"]):
-        return (
-            "أهلاً بيك! 🏢 أنا أسيل من Sky Lines للاستثمار العقاري.\n"
-            "حضرتك بتدور على سكن ولا استثمار؟"
-        )
+        return "أهلاً بيك! 🏢 حضرتك بتدور على سكن ولا استثمار؟"
 
     if any(w in text for w in ["سعر", "كام", "تقسيط", "مقدم", "دفع", "قسط"]):
         return "حضرتك مهتم بأنهي مشروع عشان أقدر أفيدك بالأسعار؟ 😊"
@@ -329,7 +398,7 @@ def fallback_response(message):
     if any(w in text for w in ["حجز", "موعد", "زيارة", "معاينة"]):
         return "تحب التواصل يكون واتساب ولا مكالمة تليفون؟ 😊"
 
-    return "أهلاً بيك! 🏢 أنا أسيل من Sky Lines. إيه اللي تحب تعرفه عن مشاريعنا؟ 😊"
+    return "أهلاً بيك! 🏢 إيه اللي تحب تعرفه عن مشاريعنا؟"
 
 
 # ============================================
@@ -364,14 +433,11 @@ def handle_comment(comment_data):
     if is_duplicate_comment(comment_id):
         return
 
-    # === رد واحد فقط على كل تعليق — ممنوع رسالتين ===
-
     is_positive = (
         any(emoji in comment_text for emoji in EMOJI_POSITIVE) or
         any(word in comment_text for word in THANK_WORDS)
     )
 
-    # 1. إيموجي فقط (بدون نص) → رد بإيموجي
     if is_positive and not any(keyword in comment_text for keyword in COMMENT_KEYWORDS):
         import random
         if any(emoji in comment_text for emoji in EMOJI_POSITIVE) and len(comment_text.strip()) <= 5:
@@ -382,7 +448,6 @@ def handle_comment(comment_data):
         logger.info(f"Positive comment from {sender_name}: {comment_text[:50]}")
         return
 
-    # 2. تعليق فيه كلمة مفتاحية (سعر، شقة، موعد...) → رد AI مختصر
     if any(keyword in comment_text for keyword in COMMENT_KEYWORDS):
         ai_reply = ask_ai_comment(comment_text, sender_name)
         if ai_reply:
@@ -395,7 +460,6 @@ def handle_comment(comment_data):
         logger.info(f"AI comment reply to {sender_name}: {comment_text[:50]}")
         return
 
-    # 3. أي تعليق تاني (مش إيموجي ومفيهوش كلمة مفتاحية) → رد ترحيبي بسيط
     reply_to_comment(
         comment_id,
         f"أهلاً يا {sender_name}! 😊 لو محتاج أي معلومات عن مشاريعنا ابعتلنا رسالة خاصة وهنساعدك!"
@@ -598,7 +662,6 @@ def split_message(text, max_length):
 # ============================================
 def save_lead(lead):
     leads_db.append(lead)
-    # Persist to Google Sheets
     try:
         conversation_store.save_lead_to_sheets(lead)
     except Exception as e:
@@ -633,7 +696,6 @@ def handle_webhook():
 
     if data.get("object") == "page":
         for entry in data.get("entry", []):
-            # Messenger messages
             for messaging_event in entry.get("messaging", []):
                 sender_id = messaging_event["sender"]["id"]
                 message_id = None
@@ -654,7 +716,6 @@ def handle_webhook():
                     payload = messaging_event["postback"]["payload"]
                     handle_message(sender_id, payload, "messenger")
 
-            # Facebook comments
             for change in entry.get("changes", []):
                 if change.get("field") == "feed" and change["value"].get("item") == "comment":
                     handle_comment(change["value"])
@@ -709,7 +770,6 @@ def handle_whatsapp_webhook():
 # ============================================
 @app.route("/api/leads", methods=["GET"])
 def get_leads():
-    # Try to get from Google Sheets if memory is empty
     all_leads = leads_db
     if not all_leads:
         try:
@@ -775,7 +835,6 @@ if __name__ == "__main__":
     if not WHATSAPP_TOKEN:
         logger.warning("⚠️ WHATSAPP_TOKEN not set - WhatsApp won't work")
 
-    # Start follow-up reminder background thread
     conversation_store.start_reminder_thread(send_message)
 
     logger.info("📋 Conversation memory: enabled (Google Sheets)")
