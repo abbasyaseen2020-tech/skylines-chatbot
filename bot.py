@@ -395,6 +395,8 @@ def handle_message(user_id, message_text, platform="messenger", message_id=None)
 # COMMENT HANDLER
 # ============================================
 def handle_comment(comment_data):
+    logger.info(f"📝 Comment webhook received: {comment_data}")
+
     comment_id = comment_data.get("comment_id")
     comment_text = comment_data.get("message", "")
     sender_name = comment_data.get("from", {}).get("name", "")
@@ -402,13 +404,21 @@ def handle_comment(comment_data):
     verb = comment_data.get("verb", "")
     post_id = comment_data.get("post_id", "")
 
+    logger.info(f"📝 Comment details: id={comment_id}, from={sender_name} ({sender_id}), verb={verb}, text='{comment_text[:50]}'")
+
     if verb != "add":
+        logger.info(f"📝 Skipping comment — verb is '{verb}', not 'add'")
+        return
+    if not comment_id:
+        logger.error("📝 ERROR: comment_id is None/empty!")
         return
     if is_duplicate_comment(comment_id):
+        logger.info(f"📝 Skipping duplicate comment: {comment_id}")
         return
 
     page_id = post_id.split("_")[0] if post_id else ""
     if sender_id == page_id:
+        logger.info(f"📝 Skipping self-comment from page")
         return
 
     is_positive = (
@@ -421,18 +431,25 @@ def handle_comment(comment_data):
             resp = random.choice(EMOJI_RESPONSES)
         else:
             resp = f"شكراً ليك يا {sender_name}! نورتنا 🙏❤️"
+        logger.info(f"📝 Replying to positive comment: {resp[:50]}")
         reply_to_comment(comment_id, resp)
+        send_private_reply(comment_id, WELCOME_DM)
         return
 
     if any(k in comment_text for k in COMMENT_KEYWORDS):
         ai_reply = ask_ai_comment(comment_text, sender_name)
         if ai_reply:
+            logger.info(f"📝 Replying with AI response: {ai_reply[:50]}")
             reply_to_comment(comment_id, ai_reply)
         else:
+            logger.info(f"📝 AI failed, using default reply")
             reply_to_comment(comment_id, f"أهلاً يا {sender_name}! 👋 ابعتلنا رسالة خاصة وهنرد عليك 😊")
+        send_private_reply(comment_id, WELCOME_DM)
         return
 
+    logger.info(f"📝 Default reply to comment")
     reply_to_comment(comment_id, f"أهلاً يا {sender_name}! 😊 لو محتاج معلومات ابعتلنا رسالة خاصة!")
+    send_private_reply(comment_id, WELCOME_DM)
 
 
 # ============================================
@@ -466,23 +483,34 @@ def _send_messenger_raw(recipient_id, text):
 
 def reply_to_comment(comment_id, text):
     url = f"{GRAPH_API_URL}/{comment_id}/comments"
+    logger.info(f"💬 Replying to comment {comment_id}: {text[:50]}...")
     try:
         r = requests.post(url, data={"message": text}, params={"access_token": PAGE_ACCESS_TOKEN}, timeout=10)
         result = r.json()
         if "error" in result:
-            logger.error(f"Comment reply error: {result['error']}")
+            logger.error(f"💬 Comment reply ERROR: {result['error']}")
+            return False
+        else:
+            logger.info(f"💬 Comment reply SUCCESS: {result}")
+            return True
     except requests.exceptions.RequestException as e:
-        logger.error(f"Comment reply failed: {e}")
+        logger.error(f"💬 Comment reply FAILED: {e}")
+        return False
 
 
 def send_private_reply(comment_id, text):
     url = f"{GRAPH_API_URL}/me/messages"
     payload = {"recipient": {"comment_id": comment_id}, "message": {"text": text}, "messaging_type": "RESPONSE"}
+    logger.info(f"📩 Sending private DM for comment {comment_id}")
     try:
         r = requests.post(url, json=payload, params={"access_token": PAGE_ACCESS_TOKEN}, timeout=10)
-        r.raise_for_status()
+        result = r.json()
+        if "error" in result:
+            logger.error(f"📩 Private reply ERROR: {result['error']}")
+        else:
+            logger.info(f"📩 Private reply SUCCESS")
     except requests.exceptions.RequestException as e:
-        logger.error(f"Private reply failed: {e}")
+        logger.error(f"📩 Private reply FAILED: {e}")
 
 
 # ============================================
@@ -557,6 +585,7 @@ def handle_webhook():
                 elif "postback" in event:
                     handle_message(sender_id, event["postback"]["payload"], "messenger")
             for change in entry.get("changes", []):
+                logger.info(f"🔔 Webhook change: field={change.get('field')}, item={change.get('value', {}).get('item')}")
                 if change.get("field") == "feed" and change["value"].get("item") == "comment":
                     handle_comment(change["value"])
     return "OK", 200
