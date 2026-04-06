@@ -627,7 +627,7 @@ def subscribe_page_feed():
     """Subscribe the page to 'feed' and 'messages' webhooks."""
     if not PAGE_ACCESS_TOKEN:
         logger.warning("No PAGE_ACCESS_TOKEN — skipping feed subscription")
-        return False
+        return {"success": False, "error": "No PAGE_ACCESS_TOKEN"}
     url = f"{GRAPH_API_URL}/me/subscribed_apps"
     params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"subscribed_fields": "feed,messages"}
@@ -636,20 +636,170 @@ def subscribe_page_feed():
         result = r.json()
         if result.get("success"):
             logger.info("✅ Page subscribed to feed + messages")
-            return True
+            return {"success": True}
         else:
             logger.error(f"Subscribe failed: {result}")
-            return False
+            return {"success": False, "error": result}
     except requests.exceptions.RequestException as e:
         logger.error(f"Subscribe error: {e}")
-        return False
+        return {"success": False, "error": str(e)}
 
 
-@app.route("/api/subscribe", methods=["POST"])
+def check_subscription_status():
+    """Check what fields the page is currently subscribed to."""
+    if not PAGE_ACCESS_TOKEN:
+        return {"error": "No PAGE_ACCESS_TOKEN"}
+    try:
+        # Get page info
+        page_resp = requests.get(
+            f"{GRAPH_API_URL}/me",
+            params={"access_token": PAGE_ACCESS_TOKEN, "fields": "id,name"},
+            timeout=10
+        )
+        page_info = page_resp.json()
+
+        # Get current subscriptions
+        sub_resp = requests.get(
+            f"{GRAPH_API_URL}/{page_info.get('id', 'me')}/subscribed_apps",
+            params={"access_token": PAGE_ACCESS_TOKEN},
+            timeout=10
+        )
+        sub_info = sub_resp.json()
+
+        return {
+            "page": page_info,
+            "subscriptions": sub_info,
+        }
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
+
+
+@app.route("/api/subscribe", methods=["GET", "POST"])
 def api_subscribe():
-    """Manually trigger page feed subscription."""
-    ok = subscribe_page_feed()
-    return jsonify({"success": ok})
+    """Check subscription status (GET) or subscribe (POST/GET with ?action=subscribe)."""
+    action = request.args.get("action", "")
+
+    if request.method == "POST" or action == "subscribe":
+        sub_result = subscribe_page_feed()
+        status = check_subscription_status()
+        return jsonify({"subscribe_result": sub_result, "current_status": status})
+
+    # GET — just show current status
+    status = check_subscription_status()
+    return jsonify({"current_status": status})
+
+
+@app.route("/api/diagnose", methods=["GET"])
+def diagnose():
+    """Full diagnostic — open in browser to see everything."""
+    results = {"timestamp": datetime.now().isoformat()}
+
+    # 1. AI Provider
+    results["ai"] = {
+        "provider": AI_PROVIDER,
+        "model": AI_MODEL,
+        "status": "✅ OK" if AI_PROVIDER != "fallback" else "❌ No API key",
+    }
+
+    # 2. Facebook Token
+    results["facebook_token"] = "✅ Set" if PAGE_ACCESS_TOKEN else "❌ Missing"
+
+    # 3. Page Info
+    if PAGE_ACCESS_TOKEN:
+        try:
+            page_resp = requests.get(
+                f"{GRAPH_API_URL}/me",
+                params={"access_token": PAGE_ACCESS_TOKEN, "fields": "id,name"},
+                timeout=10
+            )
+            page_data = page_resp.json()
+            if "error" in page_data:
+                results["page"] = {"status": "❌ Token Error", "error": page_data["error"]}
+            else:
+                results["page"] = {"status": "✅ OK", "id": page_data.get("id"), "name": page_data.get("name")}
+        except Exception as e:
+            results["page"] = {"status": "❌ Error", "error": str(e)}
+
+        # 4. Subscriptions
+        try:
+            page_id = page_data.get("id", "me") if "page_data" in dir() else "me"
+            sub_resp = requests.get(
+                f"{GRAPH_API_URL}/{page_id}/subscribed_apps",
+                params={"access_token": PAGE_ACCESS_TOKEN},
+                timeout=10
+            )
+            sub_data = sub_resp.json()
+            if "error" in sub_data:
+                results["subscriptions"] = {"status": "❌ Error", "error": sub_data["error"]}
+            else:
+                apps = sub_data.get("data", [])
+                if apps:
+                    for a in apps:
+                        fields = a.get("subscribed_fields", [])
+                        has_feed = "feed" in fields
+                        has_messages = "messages" in fields
+                        results["subscriptions"] = {
+                            "status": "✅ OK" if has_feed else "⚠️ feed missing",
+                            "app": a.get("name", a.get("id")),
+                            "fields": fields,
+                            "feed": "✅" if has_feed else "❌ MISSING — this is why comments don't work",
+                            "messages": "✅" if has_messages else "❌",
+                        }
+                else:
+                    results["subscriptions"] = {"status": "❌ No apps subscribed", "data": sub_data}
+
+            # 5. Try to subscribe now
+            sub_result = subscribe_page_feed()
+            results["auto_fix"] = sub_result
+
+            # 6. Re-check after fix
+            sub_resp2 = requests.get(
+                f"{GRAPH_API_URL}/{page_id}/subscribed_apps",
+                params={"access_token": PAGE_ACCESS_TOKEN},
+                timeout=10
+            )
+            sub_data2 = sub_resp2.json()
+            apps2 = sub_data2.get("data", [])
+            if apps2:
+                fields2 = apps2[0].get("subscribed_fields", [])
+                results["after_fix"] = {
+                    "fields": fields2,
+                    "feed": "✅" if "feed" in fields2 else "❌ Still missing — need to enable in Facebook App Dashboard",
+                }
+
+        except Exception as e:
+            results["subscriptions"] = {"status": "❌ Error", "error": str(e)}
+
+    # 7. Recent comments test
+    if PAGE_ACCESS_TOKEN:
+        try:
+            posts_resp = requests.get(
+                f"{GRAPH_API_URL}/me/posts",
+                params={"access_token": PAGE_ACCESS_TOKEN, "fields": "id,message,created_time", "limit": 3},
+                timeout=10
+            )
+            posts_data = posts_resp.json()
+            if "error" in posts_data:
+                results["recent_posts"] = {"status": "❌ Error", "error": posts_data["error"]}
+            else:
+                post_summaries = []
+                for p in posts_data.get("data", []):
+                    c_resp = requests.get(
+                        f"{GRAPH_API_URL}/{p['id']}/comments",
+                        params={"access_token": PAGE_ACCESS_TOKEN, "fields": "id,from,message", "limit": 5},
+                        timeout=10
+                    )
+                    c_data = c_resp.json()
+                    post_summaries.append({
+                        "post_id": p["id"],
+                        "post_text": (p.get("message") or "")[:50],
+                        "comments_count": len(c_data.get("data", [])),
+                    })
+                results["recent_posts"] = {"status": "✅ Can read posts", "posts": post_summaries}
+        except Exception as e:
+            results["recent_posts"] = {"status": "❌ Error", "error": str(e)}
+
+    return jsonify(results)
 
 
 # ============================================
@@ -667,7 +817,7 @@ WELCOME_DM = (
 )
 
 
-@app.route("/api/reply-old-comments", methods=["POST"])
+@app.route("/api/reply-old-comments", methods=["GET", "POST"])
 def reply_old_comments():
     """Fetch recent posts and reply to unanswered comments + send welcome DM."""
     if not PAGE_ACCESS_TOKEN:
@@ -783,7 +933,8 @@ def reply_old_comments():
 # MAIN
 # ============================================
 # Subscribe to page feed on startup
-subscribe_page_feed()
+_sub = subscribe_page_feed()
+logger.info(f"Feed subscription result: {_sub}")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
