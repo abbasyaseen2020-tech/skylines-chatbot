@@ -299,8 +299,8 @@ def _post_process(user_id, response, is_first):
     response = re.sub(r'أسيل', '', response)
 
     lines = response.strip().split('\n')
-    has_card = any('🟢' in l or '💰' in l or '━' in l for l in lines)
-    max_lines = 12 if has_card else 5
+    has_details = any(c in l for l in lines for c in ['📐', '💰', '💵', '📅', '📍', '🏢', '🟢'])
+    max_lines = 15 if has_details else 10
     if len(lines) > max_lines:
         response = '\n'.join(lines[:max_lines])
 
@@ -484,17 +484,25 @@ def _send_messenger_raw(recipient_id, text):
 def reply_to_comment(comment_id, text):
     url = f"{GRAPH_API_URL}/{comment_id}/comments"
     logger.info(f"💬 Replying to comment {comment_id}: {text[:50]}...")
+    logger.info(f"💬 URL: {url}")
+    logger.info(f"💬 Token preview: {PAGE_ACCESS_TOKEN[:20]}..." if PAGE_ACCESS_TOKEN else "💬 NO TOKEN!")
     try:
         r = requests.post(url, data={"message": text}, params={"access_token": PAGE_ACCESS_TOKEN}, timeout=10)
+        logger.info(f"💬 Response status: {r.status_code}")
+        logger.info(f"💬 Response body: {r.text[:500]}")
         result = r.json()
         if "error" in result:
-            logger.error(f"💬 Comment reply ERROR: {result['error']}")
+            error = result["error"]
+            logger.error(f"💬 Comment reply ERROR: code={error.get('code')}, subcode={error.get('error_subcode')}, type={error.get('type')}, msg={error.get('message')}")
+            # If permission error, try alternative approach
+            if error.get("code") in [10, 200, 190]:
+                logger.info(f"💬 Permission/auth error — check pages_manage_engagement permission")
             return False
         else:
             logger.info(f"💬 Comment reply SUCCESS: {result}")
             return True
-    except requests.exceptions.RequestException as e:
-        logger.error(f"💬 Comment reply FAILED: {e}")
+    except Exception as e:
+        logger.error(f"💬 Comment reply EXCEPTION: {type(e).__name__}: {e}")
         return False
 
 
@@ -649,6 +657,37 @@ def health_check():
         "facebook": "configured" if PAGE_ACCESS_TOKEN else "off",
         "whatsapp": "configured" if WHATSAPP_TOKEN else "off",
     })
+
+
+@app.route("/api/debug-permissions", methods=["GET"])
+def debug_permissions():
+    """Check what permissions the current token has."""
+    if not PAGE_ACCESS_TOKEN:
+        return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+    try:
+        # Check token permissions
+        r = requests.get(
+            f"{GRAPH_API_URL}/me/permissions",
+            params={"access_token": PAGE_ACCESS_TOKEN},
+            timeout=10
+        )
+        perms = r.json()
+
+        # Check token info
+        r2 = requests.get(
+            f"https://graph.facebook.com/debug_token",
+            params={"input_token": PAGE_ACCESS_TOKEN, "access_token": PAGE_ACCESS_TOKEN},
+            timeout=10
+        )
+        token_info = r2.json()
+
+        return jsonify({
+            "permissions": perms,
+            "token_info": token_info,
+            "token_preview": PAGE_ACCESS_TOKEN[:20] + "...",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ============================================
