@@ -1237,6 +1237,114 @@ def reply_old_comments():
 
 
 # ============================================
+# PAGE CONTENT ANALYTICS
+# ============================================
+@app.route("/api/videos", methods=["GET"])
+def fetch_videos():
+    """Fetch all videos from the page with stats."""
+    if not PAGE_ACCESS_TOKEN:
+        return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+    try:
+        r = requests.get(
+            f"{GRAPH_API_URL}/me/videos",
+            params={
+                "access_token": PAGE_ACCESS_TOKEN,
+                "fields": "id,title,description,created_time,length,views,likes.summary(true),comments.summary(true),shares",
+                "limit": 50
+            },
+            timeout=20
+        )
+        data = r.json()
+        videos = []
+        for v in data.get("data", []):
+            videos.append({
+                "id": v.get("id"),
+                "title": v.get("title", "")[:100],
+                "description": v.get("description", "")[:200],
+                "created": v.get("created_time"),
+                "length_sec": v.get("length"),
+                "views": v.get("views"),
+                "likes": v.get("likes", {}).get("summary", {}).get("total_count", 0),
+                "comments": v.get("comments", {}).get("summary", {}).get("total_count", 0),
+                "shares": v.get("shares", {}).get("count", 0),
+            })
+        return jsonify({"total": len(videos), "videos": videos})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/page-insights", methods=["GET"])
+def page_insights():
+    """Fetch page insights and stats."""
+    if not PAGE_ACCESS_TOKEN:
+        return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+    try:
+        # Page basic info
+        page_r = requests.get(
+            f"{GRAPH_API_URL}/me",
+            params={
+                "access_token": PAGE_ACCESS_TOKEN,
+                "fields": "id,name,fan_count,followers_count,talking_about_count"
+            },
+            timeout=10
+        )
+        page = page_r.json()
+
+        # Recent posts with engagement
+        posts_r = requests.get(
+            f"{GRAPH_API_URL}/me/posts",
+            params={
+                "access_token": PAGE_ACCESS_TOKEN,
+                "fields": "id,message,created_time,likes.summary(true),comments.summary(true),shares",
+                "limit": 20
+            },
+            timeout=15
+        )
+        posts_data = posts_r.json().get("data", [])
+
+        post_stats = []
+        total_likes = total_comments = total_shares = 0
+        for p in posts_data:
+            likes = p.get("likes", {}).get("summary", {}).get("total_count", 0)
+            comments = p.get("comments", {}).get("summary", {}).get("total_count", 0)
+            shares = p.get("shares", {}).get("count", 0)
+            total_likes += likes
+            total_comments += comments
+            total_shares += shares
+            post_stats.append({
+                "id": p.get("id"),
+                "text": (p.get("message") or "")[:80],
+                "created": p.get("created_time"),
+                "likes": likes,
+                "comments": comments,
+                "shares": shares,
+                "engagement": likes + comments + shares,
+            })
+
+        post_stats.sort(key=lambda x: x["engagement"], reverse=True)
+
+        followers = page.get("followers_count", 0) or page.get("fan_count", 0)
+        avg_engagement = (total_likes + total_comments + total_shares) / max(len(posts_data), 1)
+        engagement_rate = (avg_engagement / max(followers, 1)) * 100
+
+        return jsonify({
+            "page_name": page.get("name"),
+            "followers": followers,
+            "talking_about": page.get("talking_about_count"),
+            "posts_analyzed": len(posts_data),
+            "total_likes": total_likes,
+            "total_comments": total_comments,
+            "total_shares": total_shares,
+            "avg_engagement_per_post": round(avg_engagement, 1),
+            "engagement_rate_percent": round(engagement_rate, 3),
+            "top_posts": post_stats[:5],
+            "worst_posts": post_stats[-3:] if len(post_stats) > 3 else [],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
 # ICE BREAKERS
 # ============================================
 @app.route("/api/setup-ice-breakers", methods=["GET", "POST"])
