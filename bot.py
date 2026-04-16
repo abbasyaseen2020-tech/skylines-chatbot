@@ -8,11 +8,13 @@ Auto-detects OpenAI or Anthropic API
 
 import os
 import re
+import json
 import logging
 import time
 import random
+import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 from flask import Flask, request, jsonify
 
@@ -32,6 +34,15 @@ WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
 FB_APP_ID = os.getenv("FB_APP_ID", "1158857492390878")
 FB_APP_SECRET = os.getenv("FB_APP_SECRET", "")
+
+# ---- Telegram Notifications ----
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
+
+# ---- Persistent Storage ----
+DATA_DIR = os.getenv("DATA_DIR", "/tmp/skylines_data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # ---- AI Provider Auto-Detection ----
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -61,13 +72,53 @@ from knowledge_base import (
 )
 
 # ============================================
-# DATA STORES (in-memory)
+# PERSISTENT DATA STORES
 # ============================================
-leads_db = []
-conversation_history = defaultdict(list)
-user_data = {}
-phone_requested = {}
 MAX_HISTORY = 20
+
+
+def _load_json(filename, default=None):
+    path = os.path.join(DATA_DIR, filename)
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Load {filename} error: {e}")
+    return default if default is not None else {}
+
+
+def _save_json(filename, data):
+    path = os.path.join(DATA_DIR, filename)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Save {filename} error: {e}")
+
+
+# Load persisted data on startup
+leads_db = _load_json("leads.json", [])
+user_data = _load_json("user_data.json", {})
+phone_requested = _load_json("phone_requested.json", {})
+conversation_history = defaultdict(list, _load_json("conversations.json", {}))
+follow_up_tracker = _load_json("follow_up.json", {})
+
+
+def save_leads():
+    _save_json("leads.json", leads_db)
+
+
+def save_user_data():
+    _save_json("user_data.json", user_data)
+
+
+def save_conversations():
+    _save_json("conversations.json", dict(conversation_history))
+
+
+def save_follow_up():
+    _save_json("follow_up.json", follow_up_tracker)
 
 # ============================================
 # DUPLICATE MESSAGE PREVENTION
@@ -95,6 +146,57 @@ def is_duplicate_comment(comment_id):
         return True
     _processed_comments[comment_id] = now
     return False
+
+
+# ============================================
+# TELEGRAM NOTIFICATIONS
+# ============================================
+def send_telegram(text, parse_mode="HTML"):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram not configured — skipping notification")
+        return False
+    try:
+        r = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": parse_mode,
+        }, timeout=10)
+        if r.status_code == 200:
+            logger.info(f"📲 Telegram sent: {text[:50]}...")
+            return True
+        else:
+            logger.error(f"📲 Telegram error: {r.text[:200]}")
+            return False
+    except Exception as e:
+        logger.error(f"📲 Telegram exception: {e}")
+        return False
+
+
+def notify_new_lead(lead_data):
+    name = lead_data.get("name", "غير معروف")
+    phone = lead_data.get("phone", "—")
+    interest = lead_data.get("interest", "غير محدد")
+    platform = lead_data.get("platform", "messenger")
+    ts = lead_data.get("timestamp", "")
+    msg = (
+        f"🔥 <b>ليد جديد — Sky Lines!</b>\n\n"
+        f"👤 الاسم: {name}\n"
+        f"📱 الرقم: {phone}\n"
+        f"🏢 مهتم بـ: {interest}\n"
+        f"📍 المنصة: {platform}\n"
+        f"🕐 الوقت: {ts}"
+    )
+    send_telegram(msg)
+
+
+def notify_new_conversation(user_id, first_message, platform):
+    msg = (
+        f"💬 <b>محادثة جديدة!</b>\n\n"
+        f"🆔 {user_id}\n"
+        f"📍 {platform}\n"
+        f"💭 {first_message[:100]}"
+    )
+    send_telegram(msg)
 
 
 # ============================================
@@ -166,7 +268,7 @@ def _call_anthropic(system_prompt, messages, max_tokens):
     return resp.json()["content"][0]["text"]
 
 
-def _call_ai(system_prompt, messages, max_tokens=150):
+def _call_ai(system_prompt, messages, max_tokens=350):
     if AI_PROVIDER == "openai":
         return _call_openai(system_prompt, messages, max_tokens)
     elif AI_PROVIDER == "anthropic":
@@ -228,7 +330,7 @@ def ask_ai(user_id, user_message, platform="messenger"):
         system_prompt += "\n(واتساب — ردود أقصر)"
 
     try:
-        ai_response = _call_ai(system_prompt, clean_history, max_tokens=150)
+        ai_response = _call_ai(system_prompt, clean_history, max_tokens=350)
         if not ai_response:
             fb = fallback_response(user_message)
             conversation_history[user_id].append({"role": "assistant", "content": fb})
@@ -238,11 +340,22 @@ def ask_ai(user_id, user_message, platform="messenger"):
         conversation_history[user_id].append({"role": "assistant", "content": ai_response})
         extract_user_data(user_id, user_message, ai_response)
 
+        # Track for follow-up
+        follow_up_tracker[user_id] = {
+            "last_msg_time": datetime.now().isoformat(),
+            "platform": platform,
+            "followed_up": False,
+            "contacted": False,
+        }
+        save_follow_up()
+        save_conversations()
+
         phone_patterns = ["رقم حضرتك", "رقم تليفون", "رقم موبايل", "رقمك",
                           "ابعتلي رقم", "ابعتلنا رقم", "سيب رقمك",
                           "واتساب ولا مكالمة", "يكلمك", "يتواصل مع حضرتك", "نمبرك"]
         if any(p in ai_response for p in phone_patterns):
             phone_requested[user_id] = True
+            _save_json("phone_requested.json", phone_requested)
 
         logger.info(f"[{AI_PROVIDER}] {user_id}: {ai_response[:100]}...")
         return ai_response
@@ -316,8 +429,7 @@ def extract_user_data(user_id, user_message, ai_response):
     phone = extract_phone(text)
     if phone:
         user_data[user_id]["phone"] = phone
-        if user_data[user_id].get("name"):
-            auto_save_lead(user_id)
+        auto_save_lead(user_id)
 
     history = conversation_history.get(user_id, [])
     if len(history) >= 2:
@@ -351,15 +463,24 @@ def extract_phone(text):
 
 def auto_save_lead(user_id):
     data = user_data.get(user_id, {})
-    if data.get("name") and data.get("phone"):
-        if not any(l.get("phone") == data["phone"] for l in leads_db):
-            leads_db.append({
-                "name": data["name"], "phone": data["phone"],
-                "interest": data.get("interest", "غير محدد"),
-                "platform": "auto", "timestamp": datetime.now().isoformat(),
-                "user_id": user_id,
-            })
-            logger.info(f"Lead saved: {data['name']} - {data['phone']}")
+    phone = data.get("phone")
+    if not phone:
+        return
+    if any(l.get("phone") == phone for l in leads_db):
+        return
+    lead = {
+        "name": data.get("name", "غير معروف"),
+        "phone": phone,
+        "interest": data.get("interest", "غير محدد"),
+        "platform": "auto",
+        "timestamp": datetime.now().isoformat(),
+        "user_id": user_id,
+    }
+    leads_db.append(lead)
+    save_leads()
+    save_user_data()
+    logger.info(f"✅ Lead saved: {lead['name']} - {phone}")
+    notify_new_lead(lead)
 
 
 def fallback_response(message):
@@ -387,8 +508,11 @@ def handle_message(user_id, message_text, platform="messenger", message_id=None)
     if message_id and is_duplicate_message(message_id):
         return
     logger.info(f"[{platform}] {user_id}: {text[:100]}")
+    is_new = user_id not in conversation_history or len(conversation_history[user_id]) == 0
     ai_response = ask_ai(user_id, text, platform)
     send_message(user_id, ai_response, platform)
+    if is_new:
+        notify_new_conversation(user_id, text, platform)
 
 
 # ============================================
@@ -1113,11 +1237,231 @@ def reply_old_comments():
 
 
 # ============================================
+# ICE BREAKERS
+# ============================================
+@app.route("/api/setup-ice-breakers", methods=["GET", "POST"])
+def setup_ice_breakers():
+    """Set up Ice Breaker buttons for Messenger."""
+    if not PAGE_ACCESS_TOKEN:
+        return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+
+    ice_breakers = [
+        {"question": "عاوز أعرف الأسعار 💰", "payload": "عاوز اعرف اسعار الشقق"},
+        {"question": "عاوز أحجز زيارة 🏢", "payload": "عاوز احجز موعد زيارة للموقع"},
+        {"question": "إيه العروض المتاحة؟ 🎉", "payload": "عندكم عروض ايه دلوقتي"},
+        {"question": "عاوز أعرف أكتر عن المشروع 📐", "payload": "عاوز اعرف تفاصيل مشروع سكاي فيلاز"},
+    ]
+
+    try:
+        page_id_resp = requests.get(
+            f"{GRAPH_API_URL}/me",
+            params={"access_token": PAGE_ACCESS_TOKEN, "fields": "id"},
+            timeout=10
+        )
+        page_id = page_id_resp.json().get("id")
+
+        r = requests.post(
+            f"{GRAPH_API_URL}/{page_id}/messenger_profile",
+            json={"ice_breakers": ice_breakers},
+            params={"access_token": PAGE_ACCESS_TOKEN},
+            timeout=10
+        )
+        result = r.json()
+        return jsonify({"status": "✅ Ice Breakers set!", "result": result, "buttons": ice_breakers})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# FOLLOW-UP SYSTEM
+# ============================================
+@app.route("/api/follow-up", methods=["GET", "POST"])
+def run_follow_up():
+    """Send follow-up messages to users who haven't responded in 24h."""
+    if not PAGE_ACCESS_TOKEN:
+        return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+
+    hours = int(request.args.get("hours", 24))
+    cutoff = datetime.now() - timedelta(hours=hours)
+    sent = 0
+    skipped = 0
+
+    follow_up_msg = (
+        "أهلاً بيك تاني! 😊\n"
+        "لسه مهتم بوحدات Sky Villas M7؟\n"
+        "العرض الحالي — الخدمات علينا (توفير لحد 200 ألف ج) 🎉\n"
+        "لو عاوز تفاصيل أكتر أو تحجز زيارة، ابعتلنا! 🏢"
+    )
+
+    for uid, info in list(follow_up_tracker.items()):
+        try:
+            last_time = datetime.fromisoformat(info.get("last_msg_time", ""))
+        except (ValueError, TypeError):
+            continue
+
+        if last_time > cutoff:
+            skipped += 1
+            continue
+        if info.get("followed_up"):
+            skipped += 1
+            continue
+
+        has_phone = bool(user_data.get(uid, {}).get("phone"))
+        if has_phone:
+            skipped += 1
+            continue
+
+        platform = info.get("platform", "messenger")
+        try:
+            send_message(uid, follow_up_msg, platform)
+            follow_up_tracker[uid]["followed_up"] = True
+            follow_up_tracker[uid]["follow_up_time"] = datetime.now().isoformat()
+            sent += 1
+            time.sleep(1)
+        except Exception as e:
+            logger.error(f"Follow-up failed for {uid}: {e}")
+
+    save_follow_up()
+
+    # Notify on Telegram
+    if sent > 0:
+        send_telegram(f"📨 <b>Follow-up Report</b>\n✅ Sent: {sent}\n⏭ Skipped: {skipped}")
+
+    return jsonify({"sent": sent, "skipped": skipped, "hours": hours})
+
+
+@app.route("/api/mark-contacted", methods=["POST"])
+def mark_contacted():
+    """Mark a lead as contacted by sales team."""
+    uid = request.args.get("user_id") or request.json.get("user_id", "")
+    if uid and uid in follow_up_tracker:
+        follow_up_tracker[uid]["contacted"] = True
+        follow_up_tracker[uid]["contacted_time"] = datetime.now().isoformat()
+        save_follow_up()
+        return jsonify({"status": "✅ Marked as contacted", "user_id": uid})
+    return jsonify({"error": "User not found"}), 404
+
+
+# ============================================
+# DAILY REPORT
+# ============================================
+@app.route("/api/daily-report", methods=["GET"])
+def daily_report():
+    """Generate and send daily report to Telegram."""
+    today = datetime.now().date().isoformat()
+
+    # Count today's leads
+    today_leads = [l for l in leads_db if l.get("timestamp", "").startswith(today)]
+
+    # Count today's conversations
+    today_convos = 0
+    for uid, info in follow_up_tracker.items():
+        try:
+            if info.get("last_msg_time", "").startswith(today):
+                today_convos += 1
+        except Exception:
+            pass
+
+    # Pending follow-ups
+    pending_followup = sum(
+        1 for info in follow_up_tracker.values()
+        if not info.get("followed_up") and not info.get("contacted")
+    )
+
+    # Not contacted yet
+    not_contacted = sum(
+        1 for info in follow_up_tracker.values()
+        if info.get("followed_up") and not info.get("contacted")
+    )
+
+    report = (
+        f"📊 <b>تقرير يومي — Sky Lines</b>\n"
+        f"📅 {today}\n\n"
+        f"💬 محادثات اليوم: <b>{today_convos}</b>\n"
+        f"🔥 ليدات جديدة: <b>{len(today_leads)}</b>\n"
+        f"📋 إجمالي الليدات: <b>{len(leads_db)}</b>\n"
+        f"⏳ في انتظار المتابعة: <b>{pending_followup}</b>\n"
+        f"📞 تم المتابعة ولم يتم التواصل: <b>{not_contacted}</b>\n\n"
+    )
+
+    if today_leads:
+        report += "🔥 <b>ليدات اليوم:</b>\n"
+        for l in today_leads:
+            report += f"  • {l.get('name', '—')} — {l.get('phone', '—')} ({l.get('interest', '—')})\n"
+
+    sent = send_telegram(report)
+
+    return jsonify({
+        "report_sent": sent,
+        "today_conversations": today_convos,
+        "today_leads": len(today_leads),
+        "total_leads": len(leads_db),
+        "pending_followup": pending_followup,
+        "not_contacted": not_contacted,
+    })
+
+
+# ============================================
+# SCHEDULER — Auto CRON jobs
+# ============================================
+def _scheduler_loop():
+    """Background scheduler for automated tasks."""
+    while True:
+        try:
+            now = datetime.now()
+
+            # Every 30 minutes: reply to old comments
+            if now.minute in (0, 30):
+                logger.info("⏰ CRON: Replying to old comments...")
+                try:
+                    with app.test_request_context("/api/reply-old-comments?days=1"):
+                        reply_old_comments()
+                except Exception as e:
+                    logger.error(f"CRON reply-old-comments error: {e}")
+
+            # Every day at 9 PM (21:00): send daily report
+            if now.hour == 21 and now.minute == 0:
+                logger.info("⏰ CRON: Sending daily report...")
+                try:
+                    with app.test_request_context("/api/daily-report"):
+                        daily_report()
+                except Exception as e:
+                    logger.error(f"CRON daily-report error: {e}")
+
+            # Every 6 hours: follow-up with inactive users
+            if now.hour in (9, 15, 21) and now.minute == 0:
+                logger.info("⏰ CRON: Running follow-up...")
+                try:
+                    with app.test_request_context("/api/follow-up?hours=24"):
+                        run_follow_up()
+                except Exception as e:
+                    logger.error(f"CRON follow-up error: {e}")
+
+        except Exception as e:
+            logger.error(f"Scheduler error: {e}")
+
+        time.sleep(60)  # Check every minute
+
+
+# ============================================
 # MAIN
 # ============================================
 # Subscribe to page feed on startup
 _sub = subscribe_page_feed()
 logger.info(f"Feed subscription result: {_sub}")
+
+# Start background scheduler
+_scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
+_scheduler_thread.start()
+logger.info("⏰ Background scheduler started")
+
+# Setup Ice Breakers on startup
+try:
+    with app.test_request_context("/api/setup-ice-breakers"):
+        _ib = setup_ice_breakers()
+        logger.info(f"Ice Breakers: set up")
+except Exception as e:
+    logger.warning(f"Ice Breakers setup skipped: {e}")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
@@ -1125,5 +1469,5 @@ if __name__ == "__main__":
         logger.warning("⚠️ No AI key — set OPENAI_API_KEY or ANTHROPIC_API_KEY")
     else:
         logger.info(f"AI: {AI_PROVIDER} / {AI_MODEL}")
-    logger.info(f"Starting on port {port}")
+    logger.info(f"🚀 Starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=True)
