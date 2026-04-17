@@ -1298,6 +1298,32 @@ def fetch_videos():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/delete-post", methods=["GET", "POST"])
+def delete_post():
+    """Delete a post from the Facebook page by ID."""
+    if not PAGE_ACCESS_TOKEN:
+        return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+
+    post_id = request.args.get("post_id") or (request.json or {}).get("post_id", "")
+    if not post_id:
+        return jsonify({"error": "Missing post_id parameter"}), 400
+
+    try:
+        r = requests.delete(
+            f"{GRAPH_API_URL}/{post_id}",
+            params={"access_token": PAGE_ACCESS_TOKEN},
+            timeout=15
+        )
+        result = r.json()
+        return jsonify({
+            "status": "✅ Deleted" if result.get("success") else "❌ Failed",
+            "post_id": post_id,
+            "response": result
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/page-insights", methods=["GET"])
 def page_insights():
     """Fetch page insights and stats."""
