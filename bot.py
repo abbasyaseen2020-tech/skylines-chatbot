@@ -780,6 +780,31 @@ def health_check():
         "ai_model": AI_MODEL,
         "facebook": "configured" if PAGE_ACCESS_TOKEN else "off",
         "whatsapp": "configured" if WHATSAPP_TOKEN else "off",
+        "telegram": "configured" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "off",
+        "persistent_storage": DATA_DIR,
+        "leads_count": len(leads_db),
+        "active_users": len(user_data),
+    })
+
+
+@app.route("/api/telegram-test", methods=["GET"])
+def telegram_test():
+    """Test Telegram notification."""
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({"error": "TELEGRAM_BOT_TOKEN not set", "status": "❌"}), 400
+    if not TELEGRAM_CHAT_ID:
+        return jsonify({"error": "TELEGRAM_CHAT_ID not set", "status": "❌"}), 400
+
+    sent = send_telegram(
+        "🎉 <b>Telegram Bot متصل بنجاح!</b>\n\n"
+        "✅ بوت سكاي لاينز جاهز لإرسال الإشعارات\n"
+        "📊 هتوصلك تقارير يومية الساعة 9 م\n"
+        "🔥 كل ليد جديد → نوتيفيكيشن فوري"
+    )
+    return jsonify({
+        "status": "✅ Sent" if sent else "❌ Failed",
+        "bot_token_preview": TELEGRAM_BOT_TOKEN[:15] + "...",
+        "chat_id": TELEGRAM_CHAT_ID,
     })
 
 
