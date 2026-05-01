@@ -41,7 +41,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else ""
 
 # ---- Persistent Storage ----
-DATA_DIR = os.getenv("DATA_DIR", "/tmp/skylines_data")
+# Default to project-relative ./data so leads survive Railway restarts
+# (was /tmp which gets wiped on every container restart — leads were being lost!)
+DATA_DIR = os.getenv(
+    "DATA_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ---- AI Provider Auto-Detection ----
@@ -53,7 +58,8 @@ if OPENAI_API_KEY:
     _DEFAULT_MODEL = "gpt-4.1-mini"
 elif ANTHROPIC_API_KEY:
     AI_PROVIDER = "anthropic"
-    _DEFAULT_MODEL = "claude-sonnet-4-20250514"
+    # Upgraded from claude-sonnet-4-20250514 (May 2024) — newer model is faster, smarter, cheaper
+    _DEFAULT_MODEL = "claude-sonnet-4-6"
 else:
     AI_PROVIDER = "fallback"
     _DEFAULT_MODEL = "none"
@@ -499,6 +505,191 @@ def fallback_response(message):
 
 
 # ============================================
+# SOURCE DETECTION + LEAD QUALIFICATION
+# ============================================
+# Detect campaign source from FIRST message keywords.
+# Meta ad CTAs pre-fill messages like "M7" or "ابعت M7 على واتساب" — we tag those.
+SOURCE_KEYWORDS = {
+    "fb_ad_m7":       ["m7", "ام سفن", "ام 7", "m 7", "سكاي فيلاز", "sky villas"],
+    "fb_ad_hamraya":  ["الحمرايا", "حمرايا", "hamraya", "sky east"],
+    "fb_ad_ghamrawy": ["الغمراوي", "غمراوي", "غمراوى", "ghamrawy", "كومباوند"],
+}
+
+
+def detect_source(first_message):
+    text = (first_message or "").lower().strip()
+    for source, keywords in SOURCE_KEYWORDS.items():
+        for kw in keywords:
+            if kw.lower() in text:
+                return source
+    return "organic"
+
+
+# Qualification state machine — only runs for source.startswith("fb_ad_")
+Q_NEW = 0
+Q_AWAITING_BUDGET = 1
+Q_AWAITING_INTENT = 2
+Q_AWAITING_TIMELINE = 3
+Q_QUALIFIED = 4
+Q_UNQUALIFIED = 5
+
+QUALIFICATION_QUESTIONS = {
+    Q_AWAITING_BUDGET: "1️⃣ ميزانيتك في حدود كام؟ (مثلاً: 1.5 مليون / 2 مليون / أكتر)",
+    Q_AWAITING_INTENT: "2️⃣ هتستخدمها للسكن ولا الاستثمار؟",
+    Q_AWAITING_TIMELINE: "3️⃣ بتفكر تشوف الوحدة قريب ولا لسه بتدرس؟",
+}
+
+WELCOME_QUALIFIED_M7 = (
+    "أهلاً بيك في Sky Lines! 👋\n\n"
+    "خليني أفهم احتياجك صح عشان أقدر أرشدك لأنسب وحدة في Sky Villas M7.\n\n"
+    "3 أسئلة سريعة:\n\n"
+    + QUALIFICATION_QUESTIONS[Q_AWAITING_BUDGET]
+)
+
+# Min budget = lowest 40% down on cheapest unit (1.95M × 40% = 780K) minus tolerance
+MIN_BUDGET_THRESHOLD_EGP = 700_000
+
+
+def parse_budget_egp(text):
+    """Parse Arabic/English budget mentions into EGP. Returns 0 if can't parse."""
+    s = (text or "").lower().replace(",", "").replace("٬", "").replace("،", "")
+    # Handle Arabic dual/plural forms before digit parsing
+    if "مليونين" in s:
+        return 2_000_000
+    if "ثلاث ملايين" in s or "3 مليون" in s:
+        return 3_000_000
+    nums = re.findall(r'(\d+(?:\.\d+)?)', s)
+    if not nums:
+        return 0
+    n = float(nums[0])
+    if "مليون" in s or "م.ج" in s or "million" in s:
+        return n * 1_000_000
+    if "الف" in s or "ألف" in s or "k" in s:
+        return n * 1_000
+    if n < 100:           # bare number like "2" → assume millions
+        return n * 1_000_000
+    if n < 10_000:        # bare "1500" → assume thousands
+        return n * 1_000
+    return n
+
+
+def parse_intent(text):
+    s = (text or "").lower()
+    if any(w in s for w in ["استثمار", "بيع", "تأجير", "تاجير", "ربح"]):
+        if any(w in s for w in ["سكن", "اسكن", "للسكن", "اعيش", "أعيش"]):
+            return "سكن واستثمار"
+        return "استثمار"
+    if any(w in s for w in ["سكن", "اسكن", "للسكن", "اعيش", "أعيش", "عيلة", "عائلة"]):
+        return "سكن"
+    if any(w in s for w in ["مكتب", "عيادة", "مطعم", "محل", "تجاري"]):
+        return "تجاري/إداري"
+    return "غير محدد"
+
+
+def parse_timeline(text):
+    s = (text or "").lower()
+    # Order matters: "شهرين" must match before bare "شهر", "بعد سنة" before "هذا الشهر".
+    SOON = ["شهرين", "3 شهور", "ثلاث شهور", "ربع سنة", "كام شهر", "شهر اتنين"]
+    LATER = ["سنة", "بعدين", "لسه", "بفكر", "هفكر", "مش مستعجل", "مفيش وقت محدد"]
+    URGENT = ["أسبوع", "اسبوع", "قريب", "حالاً", "حالا", "دلوقتي", "النهارده", "النهاردة", "بسرعة"]
+    if any(w in s for w in SOON):
+        return "قريب"
+    if any(w in s for w in LATER):
+        return "بعدين"
+    if any(w in s for w in URGENT):
+        return "عاجل"
+    if "شهر" in s:  # bare "شهر" without dual/plural = within a month
+        return "عاجل"
+    return "غير محدد"
+
+
+def notify_qualified_lead(user_id):
+    data = user_data.get(user_id, {})
+    msg = (
+        f"🎯 <b>QUALIFIED LEAD!</b>\n\n"
+        f"📍 المصدر: <b>{data.get('source', '—')}</b>\n"
+        f"💰 الميزانية: {data.get('q_budget_text', '—')}\n"
+        f"🎯 الغرض: {data.get('q_intent', '—')}\n"
+        f"⏱ التايم لاين: {data.get('q_timeline', '—')}\n"
+        f"🆔 User: <code>{user_id}</code>\n"
+        f"🕐 {datetime.now().strftime('%H:%M')}"
+    )
+    send_telegram(msg)
+
+
+def notify_unqualified_lead(user_id, reason):
+    data = user_data.get(user_id, {})
+    msg = (
+        f"⚪ <b>Unqualified lead</b> (filtered out)\n\n"
+        f"📍 المصدر: {data.get('source', '—')}\n"
+        f"💰 الميزانية: {data.get('q_budget_text', '—')}\n"
+        f"📌 السبب: {reason}\n"
+        f"🆔 <code>{user_id}</code>"
+    )
+    send_telegram(msg)
+
+
+def run_qualification(user_id, user_message):
+    """Process a message in the qualification flow.
+    Returns the bot's reply, or None if AI should handle this turn."""
+    if user_id not in user_data:
+        user_data[user_id] = {}
+
+    state = user_data[user_id].get("q_state", Q_NEW)
+
+    if state == Q_NEW:
+        user_data[user_id]["q_state"] = Q_AWAITING_BUDGET
+        save_user_data()
+        return WELCOME_QUALIFIED_M7
+
+    if state == Q_AWAITING_BUDGET:
+        budget = parse_budget_egp(user_message)
+        user_data[user_id]["q_budget"] = budget
+        user_data[user_id]["q_budget_text"] = user_message[:80]
+        if budget > 0 and budget < MIN_BUDGET_THRESHOLD_EGP:
+            user_data[user_id]["q_state"] = Q_UNQUALIFIED
+            user_data[user_id]["q_reason"] = f"budget {budget:,.0f} below threshold"
+            save_user_data()
+            notify_unqualified_lead(user_id, f"ميزانية {budget:,.0f} ج أقل من الحد الأدنى")
+            return (
+                "شكراً ليك على اهتمامك 🙏\n\n"
+                "وحدات M7 الحالية بتبدأ من 1,955,500 ج "
+                "(مع خيار مقدم 40% = 782,200 ج).\n\n"
+                "لو الميزانية الحالية مش مناسبة، تقدر تتابعنا للوحدات الجديدة "
+                "اللي بتنزل دورياً. أي استفسار تاني تحت أمرك! 😊"
+            )
+        user_data[user_id]["q_state"] = Q_AWAITING_INTENT
+        save_user_data()
+        return f"ممتاز ✅\n\n{QUALIFICATION_QUESTIONS[Q_AWAITING_INTENT]}"
+
+    if state == Q_AWAITING_INTENT:
+        intent = parse_intent(user_message)
+        user_data[user_id]["q_intent"] = intent
+        user_data[user_id]["q_intent_text"] = user_message[:80]
+        user_data[user_id]["q_state"] = Q_AWAITING_TIMELINE
+        save_user_data()
+        return f"تمام ✅\n\n{QUALIFICATION_QUESTIONS[Q_AWAITING_TIMELINE]}"
+
+    if state == Q_AWAITING_TIMELINE:
+        timeline = parse_timeline(user_message)
+        user_data[user_id]["q_timeline"] = timeline
+        user_data[user_id]["q_timeline_text"] = user_message[:80]
+        user_data[user_id]["q_state"] = Q_QUALIFIED
+        user_data[user_id]["qualified_at"] = datetime.now().isoformat()
+        save_user_data()
+        notify_qualified_lead(user_id)
+        return (
+            "شكراً ليك! 🎉\n\n"
+            "بناءً على إجاباتك، عندي اقتراحات هتناسبك في M7. "
+            "ابعتلي رقم تليفونك عشان مدير المبيعات يكلمك بأسرع وقت، "
+            "أو اسألني أي حاجة هنا 😊"
+        )
+
+    # State is Q_QUALIFIED or Q_UNQUALIFIED — let AI handle freely
+    return None
+
+
+# ============================================
 # MESSAGE HANDLER
 # ============================================
 def handle_message(user_id, message_text, platform="messenger", message_id=None):
@@ -509,6 +700,32 @@ def handle_message(user_id, message_text, platform="messenger", message_id=None)
         return
     logger.info(f"[{platform}] {user_id}: {text[:100]}")
     is_new = user_id not in conversation_history or len(conversation_history[user_id]) == 0
+
+    # On the very first message, detect campaign source so we can attribute leads
+    if is_new:
+        if user_id not in user_data:
+            user_data[user_id] = {}
+        user_data[user_id]["source"] = detect_source(text)
+        user_data[user_id]["first_message"] = text[:200]
+        user_data[user_id]["created_at"] = datetime.now().isoformat()
+        user_data[user_id]["platform"] = platform
+        save_user_data()
+
+    # If from a paid ad, run scripted 3-question qualification before AI takes over
+    source = user_data.get(user_id, {}).get("source", "organic")
+    if source.startswith("fb_ad_"):
+        qual_reply = run_qualification(user_id, text)
+        if qual_reply:
+            # Save user msg + bot reply to history so AI has context later
+            conversation_history[user_id].append({"role": "user", "content": text})
+            conversation_history[user_id].append({"role": "assistant", "content": qual_reply})
+            save_conversations()
+            send_message(user_id, qual_reply, platform)
+            if is_new:
+                notify_new_conversation(user_id, text, platform)
+            return
+
+    # Default path: AI handles the conversation
     ai_response = ask_ai(user_id, text, platform)
     send_message(user_id, ai_response, platform)
     if is_new:
@@ -769,6 +986,57 @@ def get_stats():
         "total_leads": len(leads_db),
         "active_conversations": len(conversation_history),
         "users_with_data": len(user_data),
+    })
+
+
+@app.route("/api/campaign-stats", methods=["GET"])
+def campaign_stats():
+    """Per-source qualification funnel — divide spend by 'qualified' to get cost/qualified-lead.
+    Optional: ?source=fb_ad_m7 to filter to one campaign."""
+    source_filter = request.args.get("source", "")
+
+    funnel = defaultdict(lambda: {
+        "total_users": 0,
+        "started_qualification": 0,
+        "answered_budget": 0,
+        "answered_intent": 0,
+        "qualified": 0,
+        "unqualified": 0,
+        "with_phone": 0,
+        "qualification_rate_pct": 0.0,
+    })
+
+    for uid, data in user_data.items():
+        src = data.get("source", "organic")
+        if source_filter and src != source_filter:
+            continue
+        bucket = funnel[src]
+        bucket["total_users"] += 1
+        q_state = data.get("q_state", 0)
+        if q_state >= Q_AWAITING_BUDGET:
+            bucket["started_qualification"] += 1
+        if q_state >= Q_AWAITING_INTENT:
+            bucket["answered_budget"] += 1
+        if q_state >= Q_AWAITING_TIMELINE:
+            bucket["answered_intent"] += 1
+        if q_state == Q_QUALIFIED:
+            bucket["qualified"] += 1
+        if q_state == Q_UNQUALIFIED:
+            bucket["unqualified"] += 1
+        if data.get("phone"):
+            bucket["with_phone"] += 1
+
+    # Compute qualification rate
+    for src, bucket in funnel.items():
+        if bucket["total_users"] > 0:
+            bucket["qualification_rate_pct"] = round(
+                100 * bucket["qualified"] / bucket["total_users"], 1
+            )
+
+    return jsonify({
+        "funnel_by_source": dict(funnel),
+        "total_users_tracked": len(user_data),
+        "instructions": "Divide your Meta Ads spend per source by `qualified` to compute cost-per-qualified-lead.",
     })
 
 
@@ -1448,8 +1716,8 @@ def run_follow_up():
     follow_up_msg = (
         "أهلاً بيك تاني! 😊\n"
         "لسه مهتم بوحدات Sky Villas M7؟\n"
-        "العرض الحالي — الخدمات علينا (توفير لحد 200 ألف ج) 🎉\n"
-        "لو عاوز تفاصيل أكتر أو تحجز زيارة، ابعتلنا! 🏢"
+        "وحدات سكنية وتجارية وإدارية متاحة — شرق النيل، الحي الرابع 🏢\n"
+        "لو عاوز تفاصيل أكتر أو تحجز زيارة، ابعتلنا!"
     )
 
     for uid, info in list(follow_up_tracker.items()):
