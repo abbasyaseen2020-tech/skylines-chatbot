@@ -1076,6 +1076,57 @@ def telegram_test():
     })
 
 
+@app.route("/api/telegram-discover", methods=["GET"])
+def telegram_discover():
+    """Discover Telegram bot info + recent chats (for finding new group chat_id).
+    Usage: 1) add this bot to a group, 2) send any message in the group,
+           3) hit this endpoint to get the group chat_id."""
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({"error": "TELEGRAM_BOT_TOKEN not set"}), 400
+
+    out = {}
+    try:
+        r = requests.get(f"{TELEGRAM_API_URL}/getMe", timeout=10)
+        d = r.json().get("result", {})
+        out["bot"] = {
+            "username": "@" + d.get("username", ""),
+            "first_name": d.get("first_name"),
+            "id": d.get("id"),
+            "can_join_groups": d.get("can_join_groups"),
+            "can_read_all_group_messages": d.get("can_read_all_group_messages"),
+        }
+    except Exception as e:
+        out["bot_error"] = str(e)
+
+    try:
+        r = requests.get(f"{TELEGRAM_API_URL}/getUpdates", params={"limit": 100}, timeout=10)
+        updates = r.json().get("result", [])
+        seen = {}
+        for upd in updates:
+            msg = upd.get("message") or upd.get("channel_post") or upd.get("edited_message") or {}
+            chat = msg.get("chat", {})
+            cid = chat.get("id")
+            if cid is None:
+                continue
+            if cid not in seen:
+                seen[cid] = {
+                    "chat_id": cid,
+                    "type": chat.get("type"),
+                    "title": chat.get("title"),
+                    "username": chat.get("username"),
+                    "first_name": chat.get("first_name"),
+                    "last_message_text": (msg.get("text") or "")[:60],
+                    "last_message_from": (msg.get("from", {}) or {}).get("first_name"),
+                }
+        out["chats"] = list(seen.values())
+        out["total_updates"] = len(updates)
+    except Exception as e:
+        out["chats_error"] = str(e)
+
+    out["current_TELEGRAM_CHAT_ID"] = TELEGRAM_CHAT_ID
+    return jsonify(out)
+
+
 @app.route("/api/debug-permissions", methods=["GET"])
 def debug_permissions():
     """Check what permissions the current token has."""
