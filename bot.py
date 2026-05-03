@@ -1813,14 +1813,19 @@ def setup_ice_breakers():
 def m7_campaign_report():
     """Pull live insights from Meta Ads API and post hourly summary to Telegram.
     Configure via env vars: META_ADS_TOKEN, M7_AD_ACCOUNT, M7_CAMPAIGN_ID."""
-    META_TOKEN = os.getenv("META_ADS_TOKEN", "")
+    # Meta token: env var preferred, fallback to query param, then hardcoded fallback
+    META_TOKEN = (
+        os.getenv("META_ADS_TOKEN", "")
+        or request.args.get("meta_token", "")
+        or "EAAQdZBYkt494BReUbBK9ul1YepUVE4yRQxCC4ZA5G65LGZC3ah50n2Kah7ePmn32Plr83CFMzsX5i6PpHLnZCRBdUNiTP17lV1a4GbbilvqxVSVX5kAHzV9l8iTmJKcY22jlqyIDPCLss7GIZC2hONQZCVSZAaluhwzIskJmIokB2xigmiHZBZBCF2qTpwPQxUw3siZB2I0ctFDRYZBjwMRRLGclIsk8xUP58qkkUffsjGa"
+    )
     AD_ACCOUNT = os.getenv("M7_AD_ACCOUNT", "act_1684373276058091")
     CAMPAIGN_ID = os.getenv("M7_CAMPAIGN_ID", "52537095837436")
     ADSET_BS = os.getenv("M7_ADSET_BS", "52537097458636")
     ADSET_DIASPORA = os.getenv("M7_ADSET_DIASPORA", "52537234079236")
 
     if not META_TOKEN:
-        return jsonify({"error": "META_ADS_TOKEN env var not set on Railway"}), 400
+        return jsonify({"error": "META_ADS_TOKEN env var not set"}), 400
 
     META_API = "https://graph.facebook.com/v21.0"
 
