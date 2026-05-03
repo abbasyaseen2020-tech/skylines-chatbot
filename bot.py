@@ -1809,6 +1809,102 @@ def setup_ice_breakers():
 # ============================================
 # FOLLOW-UP SYSTEM
 # ============================================
+@app.route("/api/m7-report", methods=["GET", "POST"])
+def m7_campaign_report():
+    """Pull live insights from Meta Ads API and post hourly summary to Telegram.
+    Configure via env vars: META_ADS_TOKEN, M7_AD_ACCOUNT, M7_CAMPAIGN_ID."""
+    META_TOKEN = os.getenv("META_ADS_TOKEN", "")
+    AD_ACCOUNT = os.getenv("M7_AD_ACCOUNT", "act_1684373276058091")
+    CAMPAIGN_ID = os.getenv("M7_CAMPAIGN_ID", "52537095837436")
+    ADSET_BS = os.getenv("M7_ADSET_BS", "52537097458636")
+    ADSET_DIASPORA = os.getenv("M7_ADSET_DIASPORA", "52537234079236")
+
+    if not META_TOKEN:
+        return jsonify({"error": "META_ADS_TOKEN env var not set on Railway"}), 400
+
+    META_API = "https://graph.facebook.com/v21.0"
+
+    def meta_get(ep, fields=None, extra=None):
+        p = {"access_token": META_TOKEN}
+        if fields:
+            p["fields"] = fields
+        if extra:
+            p.update(extra)
+        try:
+            return requests.get(f"{META_API}/{ep}", params=p, timeout=20).json()
+        except Exception as e:
+            return {"error": str(e)}
+
+    # Today campaign-level
+    camp_today = meta_get(f"{CAMPAIGN_ID}/insights",
+                          "spend,impressions,reach,clicks,ctr,cpm,actions",
+                          {"date_preset": "today"})
+    today = camp_today.get("data", [{}])[0] if camp_today.get("data") else {}
+
+    # Last 1 hour
+    camp_hour = meta_get(f"{CAMPAIGN_ID}/insights",
+                         "spend,impressions,reach,clicks,actions",
+                         {"date_preset": "today",
+                          "time_range": json.dumps({"since": (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d"), "until": datetime.now().strftime("%Y-%m-%d")})})
+
+    # Per ad set today
+    bs_today = meta_get(f"{ADSET_BS}/insights",
+                        "spend,impressions,reach,clicks",
+                        {"date_preset": "today"})
+    dia_today = meta_get(f"{ADSET_DIASPORA}/insights",
+                         "spend,impressions,reach,clicks",
+                         {"date_preset": "today"})
+    bs_d = bs_today.get("data", [{}])[0] if bs_today.get("data") else {}
+    dia_d = dia_today.get("data", [{}])[0] if dia_today.get("data") else {}
+
+    # Account balance
+    acct = meta_get(AD_ACCOUNT, "balance,amount_spent,funding_source_details")
+    funding = acct.get("funding_source_details", {}).get("display_string", "")
+
+    # Ads PENDING_REVIEW count
+    ads_resp = meta_get(f"{CAMPAIGN_ID}/ads", "name,effective_status,issues_info")
+    ad_statuses = {}
+    for a in ads_resp.get("data", []):
+        st = a.get("effective_status", "?")
+        ad_statuses[st] = ad_statuses.get(st, 0) + 1
+
+    # WhatsApp leads count from local DB
+    leads_today = sum(1 for l in leads_db
+                      if l.get("timestamp", "").startswith(datetime.now().strftime("%Y-%m-%d"))
+                      and l.get("source", "").startswith("fb_ad_"))
+
+    # Telegram message
+    actions = {a["action_type"]: a["value"] for a in today.get("actions", [])}
+    convs = actions.get("onsite_conversion.messaging_conversation_started_7d", "0")
+    msg = (
+        f"📊 <b>M7 Campaign — Hourly Report</b>\n"
+        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')} (Cairo)\n\n"
+        f"💸 <b>Today Total</b>\n"
+        f"  Spend: {today.get('spend','0')} ج\n"
+        f"  Impressions: {today.get('impressions','0')}\n"
+        f"  Reach: {today.get('reach','0')}\n"
+        f"  Clicks: {today.get('clicks','0')}\n"
+        f"  CPM: {today.get('cpm','—')} ج\n"
+        f"  CTR: {today.get('ctr','0')}%\n\n"
+        f"💬 <b>WhatsApp/Conversations</b>\n"
+        f"  Conversations: {convs}\n"
+        f"  Leads (today/local): {leads_today}\n\n"
+        f"📋 <b>Per AdSet</b>\n"
+        f"  🏘️ BS Residents: {bs_d.get('spend','0')} ج · {bs_d.get('impressions','0')} impr · {bs_d.get('clicks','0')} clk\n"
+        f"  🌍 Diaspora: {dia_d.get('spend','0')} ج · {dia_d.get('impressions','0')} impr · {dia_d.get('clicks','0')} clk\n\n"
+        f"🟡 <b>Ad Statuses</b>\n"
+        + "\n".join(f"  {k}: {v}" for k, v in ad_statuses.items()) + "\n\n"
+        f"💰 <b>Balance</b>: {funding}\n"
+    )
+    sent = send_telegram(msg, parse_mode="HTML")
+    return jsonify({
+        "telegram_sent": sent,
+        "today": today,
+        "ad_statuses": ad_statuses,
+        "balance": funding,
+    })
+
+
 @app.route("/api/follow-up", methods=["GET", "POST"])
 def run_follow_up():
     """Send follow-up messages to users who haven't responded in 24h.
