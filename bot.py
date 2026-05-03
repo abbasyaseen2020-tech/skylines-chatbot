@@ -1821,7 +1821,7 @@ def m7_campaign_report():
     )
     AD_ACCOUNT = os.getenv("M7_AD_ACCOUNT", "act_1684373276058091")
     CAMPAIGN_ID = os.getenv("M7_CAMPAIGN_ID", "52537095837436")
-    ADSET_BS = os.getenv("M7_ADSET_BS", "52537097458636")
+    ADSET_BS = os.getenv("M7_ADSET_BS", "52538028132436")
     ADSET_DIASPORA = os.getenv("M7_ADSET_DIASPORA", "52537234079236")
 
     if not META_TOKEN:
