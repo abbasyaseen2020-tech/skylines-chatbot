@@ -133,6 +133,45 @@ _processed_messages = {}
 _processed_comments = {}
 DEDUP_TTL = 60
 
+# ============================================
+# BUSINESS HOURS GUARD (9 AM - 9 PM Cairo)
+# ============================================
+BUSINESS_HOURS_START = 9   # 9 AM
+BUSINESS_HOURS_END = 21    # 9 PM
+
+
+def is_business_hours():
+    """Returns True if current Cairo time is within 9 AM - 9 PM."""
+    from datetime import timezone, timedelta
+    cairo = timezone(timedelta(hours=3))
+    now = datetime.now(cairo)
+    return BUSINESS_HOURS_START <= now.hour < BUSINESS_HOURS_END
+
+
+def hours_until_open():
+    """Returns hours until next 9 AM Cairo (for quiet-hours messaging)."""
+    from datetime import timezone, timedelta
+    cairo = timezone(timedelta(hours=3))
+    now = datetime.now(cairo)
+    if now.hour >= BUSINESS_HOURS_END:
+        # After 9 PM — next 9 AM is tomorrow
+        next_open = (now + timedelta(days=1)).replace(hour=BUSINESS_HOURS_START, minute=0, second=0, microsecond=0)
+    elif now.hour < BUSINESS_HOURS_START:
+        # Before 9 AM — same day
+        next_open = now.replace(hour=BUSINESS_HOURS_START, minute=0, second=0, microsecond=0)
+    else:
+        return 0
+    delta = next_open - now
+    return round(delta.total_seconds() / 3600, 1)
+
+
+QUIET_HOURS_REPLY = (
+    "أهلاً بحضرتك! 🌙\n"
+    "وصلتنا رسالتك وبكل اهتمام.\n"
+    "مواعيد تواصل فريق Sky Lines: من 9 ص إلى 9 م.\n"
+    "هنرد عليك أول الصبح بكل التفاصيل اللي تحتاجها 😊"
+)
+
 
 def is_duplicate_message(msg_id):
     now = time.time()
@@ -724,6 +763,23 @@ def handle_message(user_id, message_text, platform="messenger", message_id=None)
             if is_new:
                 notify_new_conversation(user_id, text, platform)
             return
+
+    # ⏰ Quiet hours guard (outside 9 AM - 9 PM Cairo)
+    if not is_business_hours():
+        # Acknowledge politely instead of full AI conversation outside business hours
+        if is_new:
+            # Save context for the morning
+            conversation_history[user_id].append({"role": "user", "content": text})
+            conversation_history[user_id].append({"role": "assistant", "content": QUIET_HOURS_REPLY})
+            save_conversations()
+            send_message(user_id, QUIET_HOURS_REPLY, platform)
+            # Telegram alert is silent during quiet hours — queued for morning batch
+            logger.info(f"🌙 Quiet hours — sent acknowledgment to {user_id}, deferred Telegram alert")
+            return
+        # Returning user during quiet hours — let AI reply but skip new-lead notification
+        ai_response = ask_ai(user_id, text, platform)
+        send_message(user_id, ai_response, platform)
+        return
 
     # Default path: AI handles the conversation
     ai_response = ask_ai(user_id, text, platform)
@@ -1755,9 +1811,16 @@ def setup_ice_breakers():
 # ============================================
 @app.route("/api/follow-up", methods=["GET", "POST"])
 def run_follow_up():
-    """Send follow-up messages to users who haven't responded in 24h."""
+    """Send follow-up messages to users who haven't responded in 24h.
+    ⏰ Only fires within business hours (9 AM - 9 PM Cairo)."""
     if not PAGE_ACCESS_TOKEN:
         return jsonify({"error": "No PAGE_ACCESS_TOKEN"}), 400
+
+    # ⏰ Quiet hours guard
+    if not is_business_hours():
+        h = hours_until_open()
+        logger.info(f"🌙 Follow-up skipped — outside business hours (next open in {h}h)")
+        return jsonify({"skipped": "quiet_hours", "next_open_in_hours": h, "sent": 0})
 
     hours = int(request.args.get("hours", 24))
     cutoff = datetime.now() - timedelta(hours=hours)
