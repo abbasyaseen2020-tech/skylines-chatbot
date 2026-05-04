@@ -576,9 +576,10 @@ QUALIFICATION_QUESTIONS = {
     Q_AWAITING_BUDGET: (
         "1️⃣ ميزانيتك للشراء في Sky Villas M7؟\n\n"
         "أ) أقل من 1.5 مليون\n"
-        "ب) من 1.5 إلى 2.5 مليون\n"
-        "ج) من 2.5 إلى 4 مليون\n"
-        "د) أكتر من 4 مليون\n\n"
+        "ب) من 1.5 إلى 2 مليون\n"
+        "ج) من 2 إلى 2.5 مليون\n"
+        "د) من 2.5 إلى 3 مليون\n"
+        "هـ) أكتر من 3 مليون\n\n"
         "(اكتب الحرف أو الرقم)"
     ),
     Q_AWAITING_INTENT: (
@@ -609,18 +610,20 @@ MIN_BUDGET_THRESHOLD_EGP = 780_000
 
 
 def parse_budget_egp(text):
-    """Parse Arabic/English budget mentions OR multiple-choice answer (أ/ب/ج/د)."""
+    """Parse Arabic/English budget mentions OR multiple-choice answer (أ/ب/ج/د/هـ)."""
     s = (text or "").lower().strip().replace(",", "").replace("٬", "").replace("،", "")
-    # Multiple-choice answers
+    # Multiple-choice answers (5 ranges, increments of 500K after first)
+    if s.startswith(("هـ", "هـــ", "ه", "e", "5")):
+        return 3_500_000  # > 3M ✅
     s_first = s[:3]
     if s_first.startswith(("أ", "ا", "a", "1")):
-        return 1_000_000  # below 1.5M — will be filtered
+        return 1_000_000  # < 1.5M (filtered)
     if s_first.startswith(("ب", "b", "2")):
-        return 2_000_000  # 1.5M-2.5M ✅
+        return 1_750_000  # 1.5M-2M ✅
     if s_first.startswith(("ج", "c", "3")):
-        return 3_000_000  # 2.5M-4M ✅
+        return 2_250_000  # 2M-2.5M ✅
     if s_first.startswith(("د", "d", "4")):
-        return 5_000_000  # 4M+ ✅
+        return 2_750_000  # 2.5M-3M ✅
     # Free-form parsing
     if "مليونين" in s:
         return 2_000_000
