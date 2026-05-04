@@ -573,26 +573,55 @@ Q_QUALIFIED = 4
 Q_UNQUALIFIED = 5
 
 QUALIFICATION_QUESTIONS = {
-    Q_AWAITING_BUDGET: "1️⃣ ميزانيتك في حدود كام؟ (مثلاً: 1.5 مليون / 2 مليون / أكتر)",
-    Q_AWAITING_INTENT: "2️⃣ هتستخدمها للسكن ولا الاستثمار؟",
-    Q_AWAITING_TIMELINE: "3️⃣ بتفكر تشوف الوحدة قريب ولا لسه بتدرس؟",
+    Q_AWAITING_BUDGET: (
+        "1️⃣ ميزانيتك للشراء في Sky Villas M7؟\n\n"
+        "أ) أقل من 1.5 مليون\n"
+        "ب) من 1.5 إلى 2.5 مليون\n"
+        "ج) من 2.5 إلى 4 مليون\n"
+        "د) أكتر من 4 مليون\n\n"
+        "(اكتب الحرف أو الرقم)"
+    ),
+    Q_AWAITING_INTENT: (
+        "2️⃣ نوع الوحدة اللي بتدوّر عليها؟\n\n"
+        "أ) شقة سكنية\n"
+        "ب) محل تجاري\n"
+        "ج) وحدة إدارية / عيادة / مكتب\n"
+        "د) لسه بدوّر — مش متأكد"
+    ),
+    Q_AWAITING_TIMELINE: (
+        "3️⃣ متى تخطط للشراء؟\n\n"
+        "أ) خلال شهر — جاهز فعلاً 🔥\n"
+        "ب) خلال 3 شهور\n"
+        "ج) خلال 6 شهور\n"
+        "د) لسه بدور / بستكشف"
+    ),
 }
 
 WELCOME_QUALIFIED_M7 = (
-    "أهلاً بيك في Sky Lines! 👋\n\n"
-    "خليني أفهم احتياجك صح عشان أقدر أرشدك لأنسب وحدة في Sky Villas M7.\n\n"
-    "3 أسئلة سريعة:\n\n"
+    "أهلاً بيك في Sky Lines 👋\n"
+    "أنا المساعد الذكي اللي هرشدك لأنسب وحدة في Sky Villas M7.\n\n"
+    "3 أسئلة سريعة (دقيقة واحدة) ⏱️ وبعدها هرتب لك تواصل مع فريق المبيعات:\n\n"
     + QUALIFICATION_QUESTIONS[Q_AWAITING_BUDGET]
 )
 
-# Min budget = lowest 40% down on cheapest unit (1.95M × 40% = 780K) minus tolerance
-MIN_BUDGET_THRESHOLD_EGP = 700_000
+# Min budget = 40% down on cheapest unit (1.95M × 40% = 782,200 ج)
+MIN_BUDGET_THRESHOLD_EGP = 780_000
 
 
 def parse_budget_egp(text):
-    """Parse Arabic/English budget mentions into EGP. Returns 0 if can't parse."""
-    s = (text or "").lower().replace(",", "").replace("٬", "").replace("،", "")
-    # Handle Arabic dual/plural forms before digit parsing
+    """Parse Arabic/English budget mentions OR multiple-choice answer (أ/ب/ج/د)."""
+    s = (text or "").lower().strip().replace(",", "").replace("٬", "").replace("،", "")
+    # Multiple-choice answers
+    s_first = s[:3]
+    if s_first.startswith(("أ", "ا", "a", "1")):
+        return 1_000_000  # below 1.5M — will be filtered
+    if s_first.startswith(("ب", "b", "2")):
+        return 2_000_000  # 1.5M-2.5M ✅
+    if s_first.startswith(("ج", "c", "3")):
+        return 3_000_000  # 2.5M-4M ✅
+    if s_first.startswith(("د", "d", "4")):
+        return 5_000_000  # 4M+ ✅
+    # Free-form parsing
     if "مليونين" in s:
         return 2_000_000
     if "ثلاث ملايين" in s or "3 مليون" in s:
@@ -613,45 +642,89 @@ def parse_budget_egp(text):
 
 
 def parse_intent(text):
-    s = (text or "").lower()
+    s = (text or "").lower().strip()
+    s_first = s[:3]
+    # Multiple choice
+    if s_first.startswith(("أ", "ا", "a", "1")):
+        return "شقة سكنية"
+    if s_first.startswith(("ب", "b", "2")):
+        return "محل تجاري"
+    if s_first.startswith(("ج", "c", "3")):
+        return "إداري/عيادة"
+    if s_first.startswith(("د", "d", "4")):
+        return "مش متأكد"
+    # Free-form
     if any(w in s for w in ["استثمار", "بيع", "تأجير", "تاجير", "ربح"]):
         if any(w in s for w in ["سكن", "اسكن", "للسكن", "اعيش", "أعيش"]):
             return "سكن واستثمار"
         return "استثمار"
-    if any(w in s for w in ["سكن", "اسكن", "للسكن", "اعيش", "أعيش", "عيلة", "عائلة"]):
-        return "سكن"
-    if any(w in s for w in ["مكتب", "عيادة", "مطعم", "محل", "تجاري"]):
-        return "تجاري/إداري"
+    if any(w in s for w in ["سكن", "اسكن", "للسكن", "اعيش", "أعيش", "عيلة", "عائلة", "شقة"]):
+        return "شقة سكنية"
+    if any(w in s for w in ["محل", "تجاري"]):
+        return "محل تجاري"
+    if any(w in s for w in ["مكتب", "عيادة", "اداري", "إداري"]):
+        return "إداري/عيادة"
     return "غير محدد"
 
 
 def parse_timeline(text):
-    s = (text or "").lower()
-    # Order matters: "شهرين" must match before bare "شهر", "بعد سنة" before "هذا الشهر".
+    s = (text or "").lower().strip()
+    s_first = s[:3]
+    # Multiple choice
+    if s_first.startswith(("أ", "ا", "a", "1")):
+        return "عاجل"      # خلال شهر — HOT
+    if s_first.startswith(("ب", "b", "2")):
+        return "قريب"      # 3 شهور — WARM
+    if s_first.startswith(("ج", "c", "3")):
+        return "متوسط"     # 6 شهور — COLD
+    if s_first.startswith(("د", "d", "4")):
+        return "بدور فقط"  # browsing — COLD
+    # Free-form
     SOON = ["شهرين", "3 شهور", "ثلاث شهور", "ربع سنة", "كام شهر", "شهر اتنين"]
-    LATER = ["سنة", "بعدين", "لسه", "بفكر", "هفكر", "مش مستعجل", "مفيش وقت محدد"]
-    URGENT = ["أسبوع", "اسبوع", "قريب", "حالاً", "حالا", "دلوقتي", "النهارده", "النهاردة", "بسرعة"]
+    LATER = ["سنة", "بعدين", "لسه", "بفكر", "هفكر", "مش مستعجل", "مفيش وقت محدد", "بدور", "بستكشف"]
+    URGENT = ["أسبوع", "اسبوع", "قريب", "حالاً", "حالا", "دلوقتي", "النهارده", "النهاردة", "بسرعة", "جاهز"]
+    if any(w in s for w in URGENT):
+        return "عاجل"
     if any(w in s for w in SOON):
         return "قريب"
     if any(w in s for w in LATER):
-        return "بعدين"
-    if any(w in s for w in URGENT):
-        return "عاجل"
-    if "شهر" in s:  # bare "شهر" without dual/plural = within a month
+        return "بدور فقط"
+    if "شهر" in s:
         return "عاجل"
     return "غير محدد"
 
 
+def lead_temperature(budget, timeline):
+    """Classify lead as HOT, WARM, or COLD."""
+    if budget < MIN_BUDGET_THRESHOLD_EGP:
+        return "COLD"
+    if timeline == "عاجل" and budget >= 1_500_000:
+        return "🔥 HOT"
+    if timeline in ("عاجل", "قريب") and budget >= 1_500_000:
+        return "🟠 WARM"
+    return "🟡 NURTURE"
+
+
 def notify_qualified_lead(user_id):
     data = user_data.get(user_id, {})
+    budget = data.get("q_budget", 0)
+    timeline = data.get("q_timeline", "")
+    temp = lead_temperature(budget, timeline)
+    platform = data.get("platform", "messenger")
+    contact_link = (
+        f"https://wa.me/{user_id}" if platform == "whatsapp" else f"https://m.me/{user_id}"
+    )
     msg = (
-        f"🎯 <b>QUALIFIED LEAD!</b>\n\n"
+        f"{temp} <b>LEAD MUaHAL — جاهز للمبيعات</b>\n\n"
         f"📍 المصدر: <b>{data.get('source', '—')}</b>\n"
-        f"💰 الميزانية: {data.get('q_budget_text', '—')}\n"
-        f"🎯 الغرض: {data.get('q_intent', '—')}\n"
-        f"⏱ التايم لاين: {data.get('q_timeline', '—')}\n"
+        f"💰 الميزانية: {data.get('q_budget_text', '—')[:50]}\n"
+        f"🏠 نوع الوحدة: {data.get('q_intent', '—')}\n"
+        f"⏱ توقيت الشراء: {data.get('q_timeline', '—')}\n"
+        f"📱 المنصة: {platform}\n"
+        f"💬 لينك التواصل: {contact_link}\n"
         f"🆔 User: <code>{user_id}</code>\n"
-        f"🕐 {datetime.now().strftime('%H:%M')}"
+        f"🕐 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"<b>اتصل خلال 5 دقايق ⚡</b>"
     )
     send_telegram(msg)
 
@@ -715,14 +788,45 @@ def run_qualification(user_id, user_message):
         user_data[user_id]["q_timeline_text"] = user_message[:80]
         user_data[user_id]["q_state"] = Q_QUALIFIED
         user_data[user_id]["qualified_at"] = datetime.now().isoformat()
+
+        # Filter low-intent timing too
+        if timeline == "بدور فقط":
+            user_data[user_id]["q_state"] = Q_UNQUALIFIED
+            user_data[user_id]["q_reason"] = "browsing only — not ready"
+            save_user_data()
+            notify_unqualified_lead(user_id, "بدور بس / مش جاهز للشراء")
+            return (
+                "شكراً ليك على اهتمامك! 🙏\n\n"
+                "لما تكون جاهز للشراء فعلاً، تواصل معانا تاني وهنرتب لك الزيارة. "
+                "كل التوفيق! 😊"
+            )
+
         save_user_data()
         notify_qualified_lead(user_id)
-        return (
-            "شكراً ليك! 🎉\n\n"
-            "بناءً على إجاباتك، عندي اقتراحات هتناسبك في M7. "
-            "ابعتلي رقم تليفونك عشان مدير المبيعات يكلمك بأسرع وقت، "
-            "أو اسألني أي حاجة هنا 😊"
-        )
+
+        # Different reply based on temperature
+        budget = user_data[user_id].get("q_budget", 0)
+        temp = lead_temperature(budget, timeline)
+
+        if "HOT" in temp:
+            return (
+                "تمام جداً! 🔥\n\n"
+                "بناءً على إجاباتك، إنت من العملاء الجادين اللي عندنا أولوية عالية ليك.\n\n"
+                "✅ مدير المبيعات هيتواصل معاك على الواتساب **خلال 5 دقايق** بكل التفاصيل + مواعيد المعاينة المتاحة.\n\n"
+                "لو حابب تشاركنا أي تفاصيل إضافية (الموقع المفضّل، عدد الغرف، إلخ)، اكتبهم هنا 👇"
+            )
+        elif "WARM" in temp:
+            return (
+                "تمام، شكراً ليك! ✨\n\n"
+                "✅ فريق المبيعات هيتواصل معاك على الواتساب خلال **15 دقيقة** بكل التفاصيل المناسبة لاحتياجك.\n\n"
+                "لو عندك تفضيلات معينة (موقع/إطلالة/دور)، اكتبها هنا 👇"
+            )
+        else:
+            return (
+                "شكراً ليك! 😊\n\n"
+                "هنبعتلك تفاصيل المشروع الكاملة ومواعيد المعاينات الجاية.\n"
+                "فريق المبيعات هيكلمك خلال **اليوم** بكل التفاصيل."
+            )
 
     # State is Q_QUALIFIED or Q_UNQUALIFIED — let AI handle freely
     return None
