@@ -28,7 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "") or "EAAQdZBYkt494BRVYoIO9AiQxXa8IZC4ogkhJ9EnnWZARi9ndBZAffpNGNq1VSmSGNcpAbO0Ik8Vtvz6n1E12txoFCkp0f6pH7sPZCXMrTiA7TpwdSFaJVmon3RzIyb6zvBE8DzYPIsQxOmrLTqdfTIv8POk3TxPsgJaemmVl3Y7pBjIp1cWUZBqwnZBXD6JA9uOaKJOVVsZD"
+# Override env var with fresh token (FB invalidated old session 2026-05-04)
+# TODO: rotate this token + remove from code after Railway env var is updated
+PAGE_ACCESS_TOKEN = "EAAQdZBYkt494BRVYoIO9AiQxXa8IZC4ogkhJ9EnnWZARi9ndBZAffpNGNq1VSmSGNcpAbO0Ik8Vtvz6n1E12txoFCkp0f6pH7sPZCXMrTiA7TpwdSFaJVmon3RzIyb6zvBE8DzYPIsQxOmrLTqdfTIv8POk3TxPsgJaemmVl3Y7pBjIp1cWUZBqwnZBXD6JA9uOaKJOVVsZD"
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
