@@ -573,29 +573,32 @@ Q_QUALIFIED = 4
 Q_UNQUALIFIED = 5
 
 QUALIFICATION_QUESTIONS = {
-    Q_AWAITING_BUDGET: (
-        "1️⃣ ميزانيتك للشراء في Sky Villas M7؟\n\n"
-        "أ) أقل من 1.5 مليون\n"
-        "ب) من 1.5 إلى 2 مليون\n"
-        "ج) من 2 إلى 2.5 مليون\n"
-        "د) من 2.5 إلى 3 مليون\n"
-        "هـ) أكتر من 3 مليون\n\n"
-        "(اكتب الحرف أو الرقم)"
-    ),
-    Q_AWAITING_INTENT: (
-        "2️⃣ نوع الوحدة اللي بتدوّر عليها؟\n\n"
-        "أ) شقة سكنية\n"
-        "ب) محل تجاري\n"
-        "ج) وحدة إدارية / عيادة / مكتب\n"
-        "د) لسه بدوّر — مش متأكد"
-    ),
-    Q_AWAITING_TIMELINE: (
-        "3️⃣ متى تخطط للشراء؟\n\n"
-        "أ) خلال شهر — جاهز فعلاً 🔥\n"
-        "ب) خلال 3 شهور\n"
-        "ج) خلال 6 شهور\n"
-        "د) لسه بدور / بستكشف"
-    ),
+    Q_AWAITING_BUDGET: "1️⃣ ميزانيتك للشراء في Sky Villas M7؟",
+    Q_AWAITING_INTENT: "2️⃣ نوع الوحدة اللي بتدوّر عليها؟",
+    Q_AWAITING_TIMELINE: "3️⃣ متى تخطط للشراء؟",
+}
+
+# Interactive options for each question (used as buttons/lists)
+QUALIFICATION_OPTIONS = {
+    Q_AWAITING_BUDGET: [
+        {"id": "budget_a", "title": "أقل من 1.5 مليون"},
+        {"id": "budget_b", "title": "من 1.5 إلى 2 مليون"},
+        {"id": "budget_c", "title": "من 2 إلى 2.5 مليون"},
+        {"id": "budget_d", "title": "من 2.5 إلى 3 مليون"},
+        {"id": "budget_e", "title": "أكتر من 3 مليون"},
+    ],
+    Q_AWAITING_INTENT: [
+        {"id": "intent_a", "title": "شقة سكنية"},
+        {"id": "intent_b", "title": "محل تجاري"},
+        {"id": "intent_c", "title": "إداري / عيادة"},
+        {"id": "intent_d", "title": "مش متأكد"},
+    ],
+    Q_AWAITING_TIMELINE: [
+        {"id": "timeline_a", "title": "خلال شهر 🔥"},
+        {"id": "timeline_b", "title": "خلال 3 شهور"},
+        {"id": "timeline_c", "title": "خلال 6 شهور"},
+        {"id": "timeline_d", "title": "لسه بدور / بستكشف"},
+    ],
 }
 
 WELCOME_QUALIFIED_M7 = (
@@ -610,20 +613,42 @@ MIN_BUDGET_THRESHOLD_EGP = 780_000
 
 
 def parse_budget_egp(text):
-    """Parse Arabic/English budget mentions OR multiple-choice answer (أ/ب/ج/د/هـ)."""
+    """Parse Arabic/English budget mentions, button payload OR multiple-choice answer."""
     s = (text or "").lower().strip().replace(",", "").replace("٬", "").replace("،", "")
-    # Multiple-choice answers (5 ranges, increments of 500K after first)
-    if s.startswith(("هـ", "هـــ", "ه", "e", "5")):
-        return 3_500_000  # > 3M ✅
+    # Button payloads (IDs)
+    if "budget_a" in s:
+        return 1_000_000
+    if "budget_b" in s:
+        return 1_750_000
+    if "budget_c" in s:
+        return 2_250_000
+    if "budget_d" in s:
+        return 2_750_000
+    if "budget_e" in s:
+        return 3_500_000
+    # Button title text
+    if "أقل من 1.5" in s or "اقل من 1.5" in s:
+        return 1_000_000
+    if "1.5 إلى 2 مليون" in s or "1.5 الى 2" in s:
+        return 1_750_000
+    if "2 إلى 2.5" in s or "2 الى 2.5" in s:
+        return 2_250_000
+    if "2.5 إلى 3" in s or "2.5 الى 3" in s:
+        return 2_750_000
+    if "أكتر من 3" in s or "اكتر من 3" in s:
+        return 3_500_000
+    # Multiple-choice letter shortcuts (5 ranges)
+    if s.startswith(("هـ", "ه", "e", "5")):
+        return 3_500_000
     s_first = s[:3]
     if s_first.startswith(("أ", "ا", "a", "1")):
-        return 1_000_000  # < 1.5M (filtered)
+        return 1_000_000
     if s_first.startswith(("ب", "b", "2")):
-        return 1_750_000  # 1.5M-2M ✅
+        return 1_750_000
     if s_first.startswith(("ج", "c", "3")):
-        return 2_250_000  # 2M-2.5M ✅
+        return 2_250_000
     if s_first.startswith(("د", "d", "4")):
-        return 2_750_000  # 2.5M-3M ✅
+        return 2_750_000
     # Free-form parsing
     if "مليونين" in s:
         return 2_000_000
@@ -646,8 +671,18 @@ def parse_budget_egp(text):
 
 def parse_intent(text):
     s = (text or "").lower().strip()
+    # Button payloads
+    if "intent_a" in s: return "شقة سكنية"
+    if "intent_b" in s: return "محل تجاري"
+    if "intent_c" in s: return "إداري/عيادة"
+    if "intent_d" in s: return "مش متأكد"
+    # Button titles
+    if "شقة سكنية" in s: return "شقة سكنية"
+    if "محل تجاري" in s: return "محل تجاري"
+    if "إداري" in s or "عيادة" in s: return "إداري/عيادة"
+    if "مش متأكد" in s: return "مش متأكد"
     s_first = s[:3]
-    # Multiple choice
+    # Multiple choice letters
     if s_first.startswith(("أ", "ا", "a", "1")):
         return "شقة سكنية"
     if s_first.startswith(("ب", "b", "2")):
@@ -672,16 +707,26 @@ def parse_intent(text):
 
 def parse_timeline(text):
     s = (text or "").lower().strip()
+    # Button payloads
+    if "timeline_a" in s: return "عاجل"
+    if "timeline_b" in s: return "قريب"
+    if "timeline_c" in s: return "متوسط"
+    if "timeline_d" in s: return "بدور فقط"
+    # Button titles
+    if "خلال شهر" in s: return "عاجل"
+    if "خلال 3 شهور" in s: return "قريب"
+    if "خلال 6 شهور" in s: return "متوسط"
+    if "بدور" in s or "بستكشف" in s: return "بدور فقط"
     s_first = s[:3]
-    # Multiple choice
+    # Multiple choice letters
     if s_first.startswith(("أ", "ا", "a", "1")):
-        return "عاجل"      # خلال شهر — HOT
+        return "عاجل"
     if s_first.startswith(("ب", "b", "2")):
-        return "قريب"      # 3 شهور — WARM
+        return "قريب"
     if s_first.startswith(("ج", "c", "3")):
-        return "متوسط"     # 6 شهور — COLD
+        return "متوسط"
     if s_first.startswith(("د", "d", "4")):
-        return "بدور فقط"  # browsing — COLD
+        return "بدور فقط"
     # Free-form
     SOON = ["شهرين", "3 شهور", "ثلاث شهور", "ربع سنة", "كام شهر", "شهر اتنين"]
     LATER = ["سنة", "بعدين", "لسه", "بفكر", "هفكر", "مش مستعجل", "مفيش وقت محدد", "بدور", "بستكشف"]
@@ -744,9 +789,10 @@ def notify_unqualified_lead(user_id, reason):
     send_telegram(msg)
 
 
-def run_qualification(user_id, user_message):
+def run_qualification(user_id, user_message, platform="messenger"):
     """Process a message in the qualification flow.
-    Returns the bot's reply, or None if AI should handle this turn."""
+    Returns the bot's reply, or None if AI should handle this turn.
+    Sends interactive option buttons via WhatsApp/Messenger when asking questions."""
     if user_id not in user_data:
         user_data[user_id] = {}
 
@@ -755,7 +801,18 @@ def run_qualification(user_id, user_message):
     if state == Q_NEW:
         user_data[user_id]["q_state"] = Q_AWAITING_BUDGET
         save_user_data()
-        return WELCOME_QUALIFIED_M7
+        # Send welcome + first question with buttons
+        send_message(user_id,
+                     "أهلاً بيك في Sky Lines 👋\n"
+                     "أنا المساعد الذكي لـ Sky Villas M7.\n\n"
+                     "3 أسئلة سريعة (دقيقة) ⏱️ وبعدها هرتب لك تواصل مع فريق المبيعات.",
+                     platform)
+        time.sleep(0.5)
+        send_message_with_options(user_id,
+                                   QUALIFICATION_QUESTIONS[Q_AWAITING_BUDGET],
+                                   QUALIFICATION_OPTIONS[Q_AWAITING_BUDGET],
+                                   platform)
+        return ""  # already sent
 
     if state == Q_AWAITING_BUDGET:
         budget = parse_budget_egp(user_message)
@@ -768,14 +825,19 @@ def run_qualification(user_id, user_message):
             notify_unqualified_lead(user_id, f"ميزانية {budget:,.0f} ج أقل من الحد الأدنى")
             return (
                 "شكراً ليك على اهتمامك 🙏\n\n"
-                "وحدات M7 الحالية بتبدأ من 1,955,500 ج "
-                "(مع خيار مقدم 40% = 782,200 ج).\n\n"
-                "لو الميزانية الحالية مش مناسبة، تقدر تتابعنا للوحدات الجديدة "
-                "اللي بتنزل دورياً. أي استفسار تاني تحت أمرك! 😊"
+                "وحدات M7 الحالية تبدأ من 1,955,500 ج (مقدم 40% = 782,200 ج).\n\n"
+                "لو الميزانية الحالية مش مناسبة، نسعد بمتابعتك على الوحدات الجديدة "
+                "اللي بتنزل دورياً. تحت أمرك في أي استفسار تاني! 😊"
             )
         user_data[user_id]["q_state"] = Q_AWAITING_INTENT
         save_user_data()
-        return f"ممتاز ✅\n\n{QUALIFICATION_QUESTIONS[Q_AWAITING_INTENT]}"
+        send_message(user_id, "ممتاز ✅", platform)
+        time.sleep(0.5)
+        send_message_with_options(user_id,
+                                   QUALIFICATION_QUESTIONS[Q_AWAITING_INTENT],
+                                   QUALIFICATION_OPTIONS[Q_AWAITING_INTENT],
+                                   platform)
+        return ""
 
     if state == Q_AWAITING_INTENT:
         intent = parse_intent(user_message)
@@ -783,7 +845,13 @@ def run_qualification(user_id, user_message):
         user_data[user_id]["q_intent_text"] = user_message[:80]
         user_data[user_id]["q_state"] = Q_AWAITING_TIMELINE
         save_user_data()
-        return f"تمام ✅\n\n{QUALIFICATION_QUESTIONS[Q_AWAITING_TIMELINE]}"
+        send_message(user_id, "تمام ✅", platform)
+        time.sleep(0.5)
+        send_message_with_options(user_id,
+                                   QUALIFICATION_QUESTIONS[Q_AWAITING_TIMELINE],
+                                   QUALIFICATION_OPTIONS[Q_AWAITING_TIMELINE],
+                                   platform)
+        return ""
 
     if state == Q_AWAITING_TIMELINE:
         timeline = parse_timeline(user_message)
@@ -860,13 +928,14 @@ def handle_message(user_id, message_text, platform="messenger", message_id=None)
     # If from a paid ad, run scripted 3-question qualification before AI takes over
     source = user_data.get(user_id, {}).get("source", "organic")
     if source.startswith("fb_ad_"):
-        qual_reply = run_qualification(user_id, text)
-        if qual_reply:
+        qual_reply = run_qualification(user_id, text, platform)
+        if qual_reply is not None:  # "" = handled silently via buttons, str = send text, None = AI
             # Save user msg + bot reply to history so AI has context later
             conversation_history[user_id].append({"role": "user", "content": text})
-            conversation_history[user_id].append({"role": "assistant", "content": qual_reply})
+            if qual_reply:  # only save + send if non-empty (interactive sent already)
+                conversation_history[user_id].append({"role": "assistant", "content": qual_reply})
+                send_message(user_id, qual_reply, platform)
             save_conversations()
-            send_message(user_id, qual_reply, platform)
             if is_new:
                 notify_new_conversation(user_id, text, platform)
             return
@@ -1046,6 +1115,80 @@ def _send_whatsapp_raw(phone_number, text):
         r.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"WhatsApp send failed: {e}")
+
+
+def send_whatsapp_list(phone_number, body_text, options, button_label="اختر إجابة", header_text=None):
+    """Send WhatsApp interactive list message.
+    options: list of dicts with 'id' and 'title' (and optional 'description')."""
+    url = f"{GRAPH_API_URL}/{WHATSAPP_PHONE_ID}/messages"
+    rows = []
+    for o in options[:10]:  # WhatsApp max 10 rows
+        rows.append({
+            "id": o.get("id", o.get("title", ""))[:200],
+            "title": o.get("title", "")[:24],
+            "description": o.get("description", "")[:72] if o.get("description") else ""
+        })
+    interactive = {
+        "type": "list",
+        "body": {"text": body_text[:1024]},
+        "action": {
+            "button": button_label[:20],
+            "sections": [{"title": "اختيارات", "rows": rows}]
+        }
+    }
+    if header_text:
+        interactive["header"] = {"type": "text", "text": header_text[:60]}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": phone_number,
+        "type": "interactive",
+        "interactive": interactive
+    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        if r.status_code != 200:
+            logger.error(f"WhatsApp interactive send failed: {r.status_code} {r.text[:300]}")
+            # Fallback to plain text with options listed
+            fallback = body_text + "\n\n" + "\n".join(f"• {o.get('title')}" for o in options)
+            _send_whatsapp_raw(phone_number, fallback)
+    except Exception as e:
+        logger.error(f"WhatsApp interactive exception: {e}")
+
+
+def send_messenger_quick_replies(recipient_id, text, options):
+    """Send Messenger message with quick reply buttons.
+    options: list of dicts with 'id' (payload) and 'title'."""
+    url = f"{GRAPH_API_URL}/me/messages"
+    quick_replies = []
+    for o in options[:13]:  # Messenger max 13
+        quick_replies.append({
+            "content_type": "text",
+            "title": o.get("title", "")[:20],
+            "payload": o.get("id", o.get("title", ""))[:1000]
+        })
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text[:640], "quick_replies": quick_replies},
+        "messaging_type": "RESPONSE"
+    }
+    try:
+        r = requests.post(url, json=payload, params={"access_token": PAGE_ACCESS_TOKEN}, timeout=10)
+        if r.status_code != 200:
+            logger.error(f"Messenger quick replies failed: {r.status_code} {r.text[:300]}")
+            # Fallback to plain text
+            _send_messenger_raw(recipient_id,
+                                text + "\n\n" + "\n".join(f"• {o.get('title')}" for o in options))
+    except Exception as e:
+        logger.error(f"Messenger quick replies exception: {e}")
+
+
+def send_message_with_options(user_id, text, options, platform="messenger"):
+    """Unified: send a question with selectable options on either platform."""
+    if platform == "whatsapp":
+        send_whatsapp_list(user_id, text, options)
+    else:
+        send_messenger_quick_replies(user_id, text, options)
 
 
 # ============================================
