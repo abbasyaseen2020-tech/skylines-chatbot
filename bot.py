@@ -28,12 +28,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "") or "EAAQdZBYkt494BRVYoIO9AiQxXa8IZC4ogkhJ9EnnWZARi9ndBZAffpNGNq1VSmSGNcpAbO0Ik8Vtvz6n1E12txoFCkp0f6pH7sPZCXMrTiA7TpwdSFaJVmon3RzIyb6zvBE8DzYPIsQxOmrLTqdfTIv8POk3TxPsgJaemmVl3Y7pBjIp1cWUZBqwnZBXD6JA9uOaKJOVVsZD"
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "skylines_bot_verify_2026")
 FB_APP_ID = os.getenv("FB_APP_ID", "1158857492390878")
 FB_APP_SECRET = os.getenv("FB_APP_SECRET", "")
+
+# Fallback Page Access Token if env var is invalid/expired
+# (Refreshed 2026-05-04 after old token was invalidated by FB security)
+_FALLBACK_PAGE_TOKEN = "EAAQdZBYkt494BRVYoIO9AiQxXa8IZC4ogkhJ9EnnWZARi9ndBZAffpNGNq1VSmSGNcpAbO0Ik8Vtvz6n1E12txoFCkp0f6pH7sPZCXMrTiA7TpwdSFaJVmon3RzIyb6zvBE8DzYPIsQxOmrLTqdfTIv8POk3TxPsgJaemmVl3Y7pBjIp1cWUZBqwnZBXD6JA9uOaKJOVVsZD"
+if not os.getenv("PAGE_ACCESS_TOKEN"):
+    os.environ["PAGE_ACCESS_TOKEN"] = _FALLBACK_PAGE_TOKEN
 
 # ---- Telegram Notifications ----
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
