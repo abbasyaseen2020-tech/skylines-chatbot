@@ -742,28 +742,41 @@ def parse_timeline(text):
     return "غير محدد"
 
 
+def lead_routing(budget, timeline):
+    """Classify lead routing: MARKETING (under-budget, alternative projects) or SALES (M7).
+    Returns dict: {team, temp, note}"""
+    if budget < 1_500_000:
+        # Marketing handles — alternative projects, lower price points
+        return {
+            "team": "MARKETING",
+            "temp": "📣 MARKETING",
+            "note": "ميزانية أقل من 1.5M — اقترح مشاريع بديلة (Sky East / غيره)"
+        }
+    if timeline == "عاجل":
+        return {"team": "SALES", "temp": "🔥 HOT SALES", "note": "اتصل خلال 5 دقايق ⚡"}
+    if timeline == "قريب":
+        return {"team": "SALES", "temp": "🟠 WARM SALES", "note": "اتصل خلال 15 دقيقة"}
+    return {"team": "SALES", "temp": "🟡 NURTURE SALES", "note": "اتصل خلال اليوم"}
+
+
 def lead_temperature(budget, timeline):
-    """Classify lead as HOT, WARM, or COLD."""
-    if budget < MIN_BUDGET_THRESHOLD_EGP:
-        return "COLD"
-    if timeline == "عاجل" and budget >= 1_500_000:
-        return "🔥 HOT"
-    if timeline in ("عاجل", "قريب") and budget >= 1_500_000:
-        return "🟠 WARM"
-    return "🟡 NURTURE"
+    """Backward-compat wrapper."""
+    r = lead_routing(budget, timeline)
+    return r["temp"]
 
 
 def notify_qualified_lead(user_id):
     data = user_data.get(user_id, {})
     budget = data.get("q_budget", 0)
     timeline = data.get("q_timeline", "")
-    temp = lead_temperature(budget, timeline)
+    routing = lead_routing(budget, timeline)
     platform = data.get("platform", "messenger")
     contact_link = (
         f"https://wa.me/{user_id}" if platform == "whatsapp" else f"https://m.me/{user_id}"
     )
+    team_label = "📣 فريق التسويق" if routing["team"] == "MARKETING" else "💼 فريق المبيعات"
     msg = (
-        f"{temp} <b>LEAD MUaHAL — جاهز للمبيعات</b>\n\n"
+        f"{routing['temp']} <b>LEAD جديد — {team_label}</b>\n\n"
         f"📍 المصدر: <b>{data.get('source', '—')}</b>\n"
         f"💰 الميزانية: {data.get('q_budget_text', '—')[:50]}\n"
         f"🏠 نوع الوحدة: {data.get('q_intent', '—')}\n"
@@ -772,7 +785,7 @@ def notify_qualified_lead(user_id):
         f"💬 لينك التواصل: {contact_link}\n"
         f"🆔 User: <code>{user_id}</code>\n"
         f"🕐 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"<b>اتصل خلال 5 دقايق ⚡</b>"
+        f"<b>{routing['note']}</b>"
     )
     send_telegram(msg)
 
@@ -859,44 +872,47 @@ def run_qualification(user_id, user_message, platform="messenger"):
         user_data[user_id]["q_timeline_text"] = user_message[:80]
         user_data[user_id]["q_state"] = Q_QUALIFIED
         user_data[user_id]["qualified_at"] = datetime.now().isoformat()
+        save_user_data()
 
-        # Filter low-intent timing too
-        if timeline == "بدور فقط":
-            user_data[user_id]["q_state"] = Q_UNQUALIFIED
-            user_data[user_id]["q_reason"] = "browsing only — not ready"
-            save_user_data()
-            notify_unqualified_lead(user_id, "بدور بس / مش جاهز للشراء")
+        # Route based on budget — under 1.5M = MARKETING (alternative projects)
+        # over 1.5M = SALES (M7)
+        budget = user_data[user_id].get("q_budget", 0)
+        routing = lead_routing(budget, timeline)
+        notify_qualified_lead(user_id)  # uses routing internally
+
+        # MARKETING route — politely offer alternatives
+        if routing["team"] == "MARKETING":
             return (
-                "شكراً ليك على اهتمامك! 🙏\n\n"
-                "لما تكون جاهز للشراء فعلاً، تواصل معانا تاني وهنرتب لك الزيارة. "
-                "كل التوفيق! 😊"
+                "شكراً جزيلاً على وقتك! 🌹\n\n"
+                "Sky Villas M7 الحالي وحداته بتبدأ من 1,955,500 ج، "
+                "وأظن إنه أعلى شوية من الميزانية اللي حضرتك حددتها.\n\n"
+                "بس عندنا مشاريع تانية في Sky Lines ممكن تناسبك أكتر — "
+                "زي **Sky East** في الحمرايا بمساحات وأسعار متنوعة 🏠\n\n"
+                "✅ هكلّف **فريق التسويق** يتواصل معاك ويعرضلك الخيارات المتاحة "
+                "اللي تناسب ميزانيتك. هيكلمك في أقرب وقت 😊"
             )
 
-        save_user_data()
-        notify_qualified_lead(user_id)
-
-        # Different reply based on temperature
-        budget = user_data[user_id].get("q_budget", 0)
-        temp = lead_temperature(budget, timeline)
-
-        if "HOT" in temp:
+        # SALES route — by temperature
+        if "HOT" in routing["temp"]:
             return (
                 "تمام جداً! 🔥\n\n"
                 "بناءً على إجاباتك، إنت من العملاء الجادين اللي عندنا أولوية عالية ليك.\n\n"
-                "✅ مدير المبيعات هيتواصل معاك على الواتساب **خلال 5 دقايق** بكل التفاصيل + مواعيد المعاينة المتاحة.\n\n"
+                "✅ **فريق المبيعات** هيتواصل معاك على الواتساب **خلال 5 دقايق** "
+                "بكل التفاصيل + مواعيد المعاينة المتاحة.\n\n"
                 "لو حابب تشاركنا أي تفاصيل إضافية (الموقع المفضّل، عدد الغرف، إلخ)، اكتبهم هنا 👇"
             )
-        elif "WARM" in temp:
+        elif "WARM" in routing["temp"]:
             return (
                 "تمام، شكراً ليك! ✨\n\n"
-                "✅ فريق المبيعات هيتواصل معاك على الواتساب خلال **15 دقيقة** بكل التفاصيل المناسبة لاحتياجك.\n\n"
+                "✅ **فريق المبيعات** هيتواصل معاك على الواتساب خلال **15 دقيقة** "
+                "بكل التفاصيل المناسبة لاحتياجك.\n\n"
                 "لو عندك تفضيلات معينة (موقع/إطلالة/دور)، اكتبها هنا 👇"
             )
         else:
             return (
                 "شكراً ليك! 😊\n\n"
                 "هنبعتلك تفاصيل المشروع الكاملة ومواعيد المعاينات الجاية.\n"
-                "فريق المبيعات هيكلمك خلال **اليوم** بكل التفاصيل."
+                "**فريق المبيعات** هيكلمك خلال **اليوم** بكل التفاصيل."
             )
 
     # State is Q_QUALIFIED or Q_UNQUALIFIED — let AI handle freely
