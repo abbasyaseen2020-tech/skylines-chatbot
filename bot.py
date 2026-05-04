@@ -1045,6 +1045,42 @@ def get_stats():
     })
 
 
+@app.route("/api/last-conversation", methods=["GET"])
+def last_conversation():
+    """Returns the most recently active conversation. Optional ?user_id=X to fetch a specific one,
+    otherwise picks the user with the latest follow_up_tracker timestamp."""
+    user_id = request.args.get("user_id", "").strip()
+
+    if not user_id:
+        latest_uid, latest_ts = None, ""
+        for uid, info in follow_up_tracker.items():
+            ts = info.get("last_msg_time", "")
+            if ts > latest_ts:
+                latest_ts, latest_uid = ts, uid
+        if not latest_uid:
+            if not conversation_history:
+                return jsonify({"error": "no conversations yet"}), 404
+            latest_uid = next(iter(conversation_history.keys()))
+        user_id = latest_uid
+
+    history = conversation_history.get(user_id, [])
+    if not history:
+        return jsonify({"error": f"no conversation for user_id {user_id}"}), 404
+
+    info = follow_up_tracker.get(user_id, {})
+    udata = user_data.get(user_id, {})
+    return jsonify({
+        "user_id": user_id,
+        "platform": info.get("platform"),
+        "last_msg_time": info.get("last_msg_time"),
+        "name": udata.get("name"),
+        "phone": udata.get("phone"),
+        "source": udata.get("source"),
+        "message_count": len(history),
+        "messages": history,
+    })
+
+
 @app.route("/api/campaign-stats", methods=["GET"])
 def campaign_stats():
     """Per-source qualification funnel — divide spend by 'qualified' to get cost/qualified-lead.
