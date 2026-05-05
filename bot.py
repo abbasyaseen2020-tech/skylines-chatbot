@@ -577,13 +577,15 @@ Q_NEW = 0
 Q_AWAITING_BUDGET = 1
 Q_AWAITING_INTENT = 2
 Q_AWAITING_TIMELINE = 3
-Q_QUALIFIED = 4
-Q_UNQUALIFIED = 5
+Q_AWAITING_BS_ORIGIN = 4   # NEW — BS connection filter
+Q_QUALIFIED = 5
+Q_UNQUALIFIED = 6
 
 QUALIFICATION_QUESTIONS = {
     Q_AWAITING_BUDGET: "1️⃣ ميزانيتك للشراء في Sky Villas M7؟",
     Q_AWAITING_INTENT: "2️⃣ نوع الوحدة اللي بتدوّر عليها؟",
     Q_AWAITING_TIMELINE: "3️⃣ متى تخطط للشراء؟",
+    Q_AWAITING_BS_ORIGIN: "4️⃣ علاقتك ببني سويف إيه؟",
 }
 
 # Interactive options for each question (used as buttons/lists)
@@ -607,12 +609,19 @@ QUALIFICATION_OPTIONS = {
         {"id": "timeline_c", "title": "خلال 6 شهور"},
         {"id": "timeline_d", "title": "لسه بدور / بستكشف"},
     ],
+    Q_AWAITING_BS_ORIGIN: [
+        {"id": "bs_a", "title": "أصلي من بني سويف"},
+        {"id": "bs_b", "title": "أهلي/عيلتي من بني سويف"},
+        {"id": "bs_c", "title": "درست أو شغلت في بني سويف"},
+        {"id": "bs_d", "title": "ساكن/شغال في بني سويف"},
+        {"id": "bs_e", "title": "لا، بس مهتم بالاستثمار"},
+    ],
 }
 
 WELCOME_QUALIFIED_M7 = (
     "أهلاً بيك في Sky Lines 👋\n"
     "أنا المساعد الذكي اللي هرشدك لأنسب وحدة في Sky Villas M7.\n\n"
-    "3 أسئلة سريعة (دقيقة واحدة) ⏱️ وبعدها هرتب لك تواصل مع فريق المبيعات:\n\n"
+    "4 أسئلة سريعة (دقيقة واحدة) ⏱️ وبعدها هرتب لك تواصل مع فريق المبيعات:\n\n"
     + QUALIFICATION_QUESTIONS[Q_AWAITING_BUDGET]
 )
 
@@ -750,16 +759,81 @@ def parse_timeline(text):
     return "غير محدد"
 
 
-def lead_routing(budget, timeline):
+def parse_bs_origin(text):
+    """Parse Beni Suef connection answer.
+    Returns one of: 'native', 'family', 'study_work', 'resident', 'investor_only', 'unknown'."""
+    s = (text or "").lower().strip()
+    # Button payloads
+    if "bs_a" in s: return "native"
+    if "bs_b" in s: return "family"
+    if "bs_c" in s: return "study_work"
+    if "bs_d" in s: return "resident"
+    if "bs_e" in s: return "investor_only"
+    # Button titles
+    if "أصلي من بني سويف" in s or "اصلي من بني سويف" in s:
+        return "native"
+    if "أهلي" in s or "اهلي" in s or "عيلتي" in s or "عائلتي" in s:
+        return "family"
+    if "درست" in s or "شغلت" in s or "اشتغلت" in s:
+        return "study_work"
+    if "ساكن" in s or "شغال في بني سويف" in s or "بشتغل في بني سويف" in s:
+        return "resident"
+    if "مهتم بالاستثمار" in s or "مستثمر" in s or "بس استثمار" in s:
+        return "investor_only"
+    # Multiple-choice letters
+    s_first = s[:3]
+    if s_first.startswith(("أ", "ا", "a", "1")): return "native"
+    if s_first.startswith(("ب", "b", "2")): return "family"
+    if s_first.startswith(("ج", "c", "3")): return "study_work"
+    if s_first.startswith(("د", "d", "4")): return "resident"
+    if s_first.startswith(("هـ", "ه", "e", "5")): return "investor_only"
+    # Free-form fallback
+    if "بني سويف" in s and ("أصل" in s or "اصل" in s or "من" in s):
+        return "native"
+    if "بني سويف" in s and ("أهل" in s or "اهل" in s):
+        return "family"
+    if "بني سويف" in s:
+        return "resident"
+    if any(w in s for w in ["لا", "ما", "مش", "no"]):
+        return "investor_only"
+    return "unknown"
+
+
+def lead_routing(budget, timeline, bs_origin="unknown"):
     """Classify lead routing: MARKETING (under-budget, alternative projects) or SALES (M7).
+    Now factors in BS-origin for priority boosting.
     Returns dict: {team, temp, note}"""
     if budget < 1_500_000:
         # Marketing handles — alternative projects, lower price points
         return {
             "team": "MARKETING",
             "temp": "📣 MARKETING",
-            "note": "ميزانية أقل من 1.5M — اقترح مشاريع بديلة (Sky East / غيره)"
+            "note": f"ميزانية أقل من 1.5M — اقترح مشاريع بديلة (Sky East / غيره) | علاقة ببني سويف: {bs_origin}"
         }
+
+    # BS-origin = real organic interest → priority lane
+    bs_strong = bs_origin in ("native", "family", "study_work", "resident")
+    bs_weak = bs_origin in ("investor_only",)
+
+    if bs_strong:
+        if timeline == "عاجل":
+            return {"team": "SALES", "temp": "🔥🔥 HOT-BS SALES",
+                    "note": f"بني سويف ({bs_origin}) + شراء عاجل — اتصل خلال 3 دقايق ⚡⚡"}
+        if timeline == "قريب":
+            return {"team": "SALES", "temp": "🟠 WARM-BS SALES",
+                    "note": f"بني سويف ({bs_origin}) + شراء قريب — اتصل خلال 10 دقايق"}
+        return {"team": "SALES", "temp": "🟡 NURTURE-BS SALES",
+                "note": f"بني سويف ({bs_origin}) + nurture — اتصل خلال اليوم"}
+
+    if bs_weak:
+        # Investor-only — interested but no BS connection
+        if timeline == "عاجل":
+            return {"team": "SALES", "temp": "🟠 WARM-INVESTOR",
+                    "note": "مستثمر فقط (لا صلة ببني سويف) + شراء عاجل — اتصل خلال 30 دقيقة"}
+        return {"team": "SALES", "temp": "🟡 NURTURE-INVESTOR",
+                "note": "مستثمر فقط (لا صلة ببني سويف) — اتصل خلال يومين"}
+
+    # Unknown BS origin — fallback to old logic
     if timeline == "عاجل":
         return {"team": "SALES", "temp": "🔥 HOT SALES", "note": "اتصل خلال 5 دقايق ⚡"}
     if timeline == "قريب":
@@ -767,9 +841,9 @@ def lead_routing(budget, timeline):
     return {"team": "SALES", "temp": "🟡 NURTURE SALES", "note": "اتصل خلال اليوم"}
 
 
-def lead_temperature(budget, timeline):
+def lead_temperature(budget, timeline, bs_origin="unknown"):
     """Backward-compat wrapper."""
-    r = lead_routing(budget, timeline)
+    r = lead_routing(budget, timeline, bs_origin)
     return r["temp"]
 
 
@@ -777,18 +851,31 @@ def notify_qualified_lead(user_id):
     data = user_data.get(user_id, {})
     budget = data.get("q_budget", 0)
     timeline = data.get("q_timeline", "")
-    routing = lead_routing(budget, timeline)
+    bs_origin = data.get("q_bs_origin", "unknown")
+    routing = lead_routing(budget, timeline, bs_origin)
     platform = data.get("platform", "messenger")
     contact_link = (
         f"https://wa.me/{user_id}" if platform == "whatsapp" else f"https://m.me/{user_id}"
     )
     team_label = "📣 فريق التسويق" if routing["team"] == "MARKETING" else "💼 فريق المبيعات"
+
+    # Translate BS origin to Arabic display
+    bs_display = {
+        "native": "🌳 أصلي من بني سويف",
+        "family": "👨‍👩‍👧 أهل/عيلة من بني سويف",
+        "study_work": "🎓 درس/شغل في بني سويف",
+        "resident": "🏠 ساكن/شغال في بني سويف",
+        "investor_only": "💰 مستثمر فقط (لا صلة)",
+        "unknown": "❓ مش متحدد",
+    }.get(bs_origin, bs_origin)
+
     msg = (
         f"{routing['temp']} <b>LEAD جديد — {team_label}</b>\n\n"
         f"📍 المصدر: <b>{data.get('source', '—')}</b>\n"
         f"💰 الميزانية: {data.get('q_budget_text', '—')[:50]}\n"
         f"🏠 نوع الوحدة: {data.get('q_intent', '—')}\n"
         f"⏱ توقيت الشراء: {data.get('q_timeline', '—')}\n"
+        f"🌍 صلة ببني سويف: {bs_display}\n"
         f"📱 المنصة: {platform}\n"
         f"💬 لينك التواصل: {contact_link}\n"
         f"🆔 User: <code>{user_id}</code>\n"
@@ -878,14 +965,28 @@ def run_qualification(user_id, user_message, platform="messenger"):
         timeline = parse_timeline(user_message)
         user_data[user_id]["q_timeline"] = timeline
         user_data[user_id]["q_timeline_text"] = user_message[:80]
+        user_data[user_id]["q_state"] = Q_AWAITING_BS_ORIGIN
+        save_user_data()
+        send_message(user_id, "تمام ✅", platform)
+        time.sleep(0.5)
+        send_message_with_options(user_id,
+                                   QUALIFICATION_QUESTIONS[Q_AWAITING_BS_ORIGIN],
+                                   QUALIFICATION_OPTIONS[Q_AWAITING_BS_ORIGIN],
+                                   platform)
+        return ""
+
+    if state == Q_AWAITING_BS_ORIGIN:
+        bs_origin = parse_bs_origin(user_message)
+        user_data[user_id]["q_bs_origin"] = bs_origin
+        user_data[user_id]["q_bs_origin_text"] = user_message[:80]
         user_data[user_id]["q_state"] = Q_QUALIFIED
         user_data[user_id]["qualified_at"] = datetime.now().isoformat()
         save_user_data()
 
-        # Route based on budget — under 1.5M = MARKETING (alternative projects)
-        # over 1.5M = SALES (M7)
+        # Route based on budget + timeline + BS origin
         budget = user_data[user_id].get("q_budget", 0)
-        routing = lead_routing(budget, timeline)
+        timeline = user_data[user_id].get("q_timeline", "")
+        routing = lead_routing(budget, timeline, bs_origin)
         notify_qualified_lead(user_id)  # uses routing internally
 
         # MARKETING route — politely offer alternatives
@@ -900,25 +1001,41 @@ def run_qualification(user_id, user_message, platform="messenger"):
                 "اللي تناسب ميزانيتك. هيكلمك في أقرب وقت 😊"
             )
 
+        # Personalize greeting based on BS origin
+        bs_intro = ""
+        if bs_origin == "native":
+            bs_intro = "أهلاً بأهل بني سويف 🌳 — ده مشروعك في موطنك.\n\n"
+        elif bs_origin == "family":
+            bs_intro = "تشرفنا — يبقى عيلتك في بني سويف هتفتخر بيك ❤️\n\n"
+        elif bs_origin == "study_work":
+            bs_intro = "بني سويف بلدك بالتربية ✨\n\n"
+        elif bs_origin == "resident":
+            bs_intro = "أهلاً بجارنا في بني سويف 🤝\n\n"
+        elif bs_origin == "investor_only":
+            bs_intro = "Sky Villas M7 = استثمار قوي في الموقع الأقوى ببني سويف 💎\n\n"
+
         # SALES route — by temperature
         if "HOT" in routing["temp"]:
             return (
-                "تمام جداً! 🔥\n\n"
-                "بناءً على إجاباتك، إنت من العملاء الجادين اللي عندنا أولوية عالية ليك.\n\n"
+                bs_intro
+                + "تمام جداً! 🔥\n\n"
+                "بناءً على إجاباتك، إنت من العملاء الجادين اللي عندنا أولوية قصوى ليك.\n\n"
                 "✅ **فريق المبيعات** هيتواصل معاك على الواتساب **خلال 5 دقايق** "
                 "بكل التفاصيل + مواعيد المعاينة المتاحة.\n\n"
                 "لو حابب تشاركنا أي تفاصيل إضافية (الموقع المفضّل، عدد الغرف، إلخ)، اكتبهم هنا 👇"
             )
         elif "WARM" in routing["temp"]:
             return (
-                "تمام، شكراً ليك! ✨\n\n"
+                bs_intro
+                + "تمام، شكراً ليك! ✨\n\n"
                 "✅ **فريق المبيعات** هيتواصل معاك على الواتساب خلال **15 دقيقة** "
                 "بكل التفاصيل المناسبة لاحتياجك.\n\n"
                 "لو عندك تفضيلات معينة (موقع/إطلالة/دور)، اكتبها هنا 👇"
             )
         else:
             return (
-                "شكراً ليك! 😊\n\n"
+                bs_intro
+                + "شكراً ليك! 😊\n\n"
                 "هنبعتلك تفاصيل المشروع الكاملة ومواعيد المعاينات الجاية.\n"
                 "**فريق المبيعات** هيكلمك خلال **اليوم** بكل التفاصيل."
             )
@@ -1330,10 +1447,17 @@ def campaign_stats():
         "started_qualification": 0,
         "answered_budget": 0,
         "answered_intent": 0,
+        "answered_timeline": 0,
         "qualified": 0,
         "unqualified": 0,
         "with_phone": 0,
         "qualification_rate_pct": 0.0,
+        "bs_native": 0,
+        "bs_family": 0,
+        "bs_study_work": 0,
+        "bs_resident": 0,
+        "bs_investor_only": 0,
+        "bs_unknown": 0,
     })
 
     for uid, data in user_data.items():
@@ -1349,12 +1473,20 @@ def campaign_stats():
             bucket["answered_budget"] += 1
         if q_state >= Q_AWAITING_TIMELINE:
             bucket["answered_intent"] += 1
+        if q_state >= Q_AWAITING_BS_ORIGIN:
+            bucket["answered_timeline"] += 1
         if q_state == Q_QUALIFIED:
             bucket["qualified"] += 1
         if q_state == Q_UNQUALIFIED:
             bucket["unqualified"] += 1
         if data.get("phone"):
             bucket["with_phone"] += 1
+        # BS origin distribution
+        bs = data.get("q_bs_origin")
+        if bs:
+            key = f"bs_{bs}"
+            if key in bucket:
+                bucket[key] += 1
 
     # Compute qualification rate
     for src, bucket in funnel.items():
