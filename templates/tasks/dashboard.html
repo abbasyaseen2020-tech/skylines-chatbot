@@ -1,0 +1,207 @@
+{% extends "tasks/base.html" %}
+{% block title %}لوحة التحكم{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h4 class="fw-bold mb-0">
+      {% if user.role == 'admin' %}لوحة المدير{% else %}تاسكاتي{% endif %}
+    </h4>
+    <small class="text-muted">{{ now().strftime('%A، %d %B %Y') if now else '' }}</small>
+  </div>
+  <a href="{{ url_for('tasks.new_task') }}" class="btn btn-primary">
+    <i class="bi bi-plus-lg me-1"></i> تاسك جديدة
+  </a>
+</div>
+
+<!-- Stats Bar -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-2">
+    <div class="stat-card card text-center p-3 bg-white">
+      <div class="num text-dark">{{ counts.total }}</div>
+      <div class="text-muted small">الكل</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-2">
+    <a href="{{ url_for('tasks.dashboard', status='pending') }}" class="text-decoration-none">
+      <div class="stat-card card text-center p-3 bg-warning bg-opacity-10">
+        <div class="num text-warning">{{ counts.pending }}</div>
+        <div class="text-muted small">انتظار الموافقة</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-2">
+    <a href="{{ url_for('tasks.dashboard', status='in_progress') }}" class="text-decoration-none">
+      <div class="stat-card card text-center p-3 bg-primary bg-opacity-10">
+        <div class="num text-primary">{{ counts.in_progress }}</div>
+        <div class="text-muted small">جاري التنفيذ</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-2">
+    <a href="{{ url_for('tasks.dashboard', status='done') }}" class="text-decoration-none">
+      <div class="stat-card card text-center p-3 bg-success bg-opacity-10">
+        <div class="num text-success">{{ counts.done }}</div>
+        <div class="text-muted small">مكتملة</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-2">
+    <a href="{{ url_for('tasks.dashboard', status='overdue') }}" class="text-decoration-none">
+      <div class="stat-card card text-center p-3 bg-danger bg-opacity-10">
+        <div class="num text-danger">{{ counts.overdue }}</div>
+        <div class="text-muted small">متأخرة</div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="card border-0 shadow-sm mb-4 p-3">
+  <form method="get" class="row g-2 align-items-end">
+    <div class="col-12 col-md-3">
+      <label class="form-label small fw-semibold">الحالة</label>
+      <select name="status" class="form-select form-select-sm">
+        <option value="">الكل</option>
+        {% for k, (ar, _) in STATUS_AR.items() %}
+          <option value="{{ k }}" {% if status_filter == k %}selected{% endif %}>{{ ar }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-12 col-md-3">
+      <label class="form-label small fw-semibold">الأولوية</label>
+      <select name="priority" class="form-select form-select-sm">
+        <option value="">الكل</option>
+        {% for k, (ar, _) in PRIORITY_AR.items() %}
+          <option value="{{ k }}" {% if priority_filter == k %}selected{% endif %}>{{ ar }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% if user.role == 'admin' %}
+    <div class="col-12 col-md-3">
+      <label class="form-label small fw-semibold">القسم</label>
+      <select name="dept" class="form-select form-select-sm">
+        <option value="">كل الأقسام</option>
+        {% for dk, dn in DEPARTMENTS.items() %}
+          <option value="{{ dk }}" {% if dept_filter == dk %}selected{% endif %}>{{ dn }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-12 col-md-3">
+      <label class="form-label small fw-semibold">العضو</label>
+      <select name="member" class="form-select form-select-sm">
+        <option value="">الكل</option>
+        {% for uname, m in members.items() %}
+          <option value="{{ uname }}" {% if member_filter == uname %}selected{% endif %}>{{ m.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    <div class="col-12 col-md-3 d-flex gap-2">
+      <button type="submit" class="btn btn-sm btn-primary flex-grow-1">
+        <i class="bi bi-funnel"></i> فلتر
+      </button>
+      <a href="{{ url_for('tasks.dashboard') }}" class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-x"></i>
+      </a>
+    </div>
+  </form>
+</div>
+
+<!-- Tasks List -->
+{% if tasks %}
+<div class="row g-3">
+  {% for task in tasks %}
+  {% set status_ar, status_color = STATUS_AR.get(task.status, (task.status, 'secondary')) %}
+  {% set priority_ar, priority_color = PRIORITY_AR.get(task.get('priority','medium'), ('متوسطة','warning')) %}
+  {% set steps_total = task.steps | length %}
+  {% set steps_done  = task.steps | selectattr('done') | list | length %}
+  <div class="col-12 col-md-6 col-xl-4">
+    <a href="{{ url_for('tasks.task_detail', task_id=task.id) }}" class="text-decoration-none">
+      <div class="card task-card border-{{ status_color }} h-100">
+        <div class="card-body">
+          <!-- Header row -->
+          <div class="d-flex justify-content-between align-items-start mb-2">
+            <span class="badge bg-{{ status_color }}">{{ status_ar }}</span>
+            <span class="badge bg-{{ priority_color }} bg-opacity-75">{{ priority_ar }}</span>
+          </div>
+
+          <h6 class="fw-bold text-dark mb-1">{{ task.title }}</h6>
+          {% if task.description %}
+          <p class="text-muted small mb-2" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">
+            {{ task.description }}
+          </p>
+          {% endif %}
+
+          <!-- Meta -->
+          <div class="d-flex flex-wrap gap-2 small text-muted mt-2">
+            {% if user.role == 'admin' %}
+            {% set owner_m = members.get(task.created_by, {}) %}
+            <span><i class="bi bi-person-fill"></i>
+              {{ owner_m.get('name', task.created_by) }}
+            </span>
+            {% set owner_dept = owner_m.get('department','') %}
+            {% if owner_dept %}
+            <span class="badge bg-light text-dark border">
+              {{ DEPARTMENTS.get(owner_dept, owner_dept) }}
+            </span>
+            {% endif %}
+            {% endif %}
+            {% if task.deadline %}
+            {% set dl = task.deadline[:10] %}
+            <span class="{% if task.status == 'overdue' %}text-danger fw-bold{% endif %}">
+              <i class="bi bi-calendar-event"></i> {{ dl }}
+            </span>
+            {% endif %}
+            {% if task.category %}
+            <span><i class="bi bi-tag"></i> {{ task.category }}</span>
+            {% endif %}
+          </div>
+
+          <!-- Steps progress -->
+          {% if steps_total > 0 %}
+          <div class="mt-3">
+            <div class="d-flex justify-content-between small text-muted mb-1">
+              <span>الخطوات</span>
+              <span>{{ steps_done }}/{{ steps_total }}</span>
+            </div>
+            <div class="progress" style="height:6px;border-radius:4px">
+              <div class="progress-bar bg-{{ 'success' if steps_done == steps_total else 'primary' }}"
+                   style="width:{{ (steps_done / steps_total * 100) | int }}%"></div>
+            </div>
+          </div>
+          {% endif %}
+
+          <!-- Overdue warning -->
+          {% if task.status == 'overdue' %}
+          <div class="alert alert-danger py-1 px-2 mt-2 mb-0 small">
+            <i class="bi bi-alarm-fill"></i> متأخرة عن الموعد!
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </a>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="text-center py-5 text-muted">
+  <i class="bi bi-inbox display-4"></i>
+  <p class="mt-3 fs-5">مفيش تاسكات {% if status_filter %}بهذه الحالة{% endif %}</p>
+  <a href="{{ url_for('tasks.new_task') }}" class="btn btn-primary mt-2">
+    <i class="bi bi-plus-lg"></i> أضف تاسك جديدة
+  </a>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Auto-dismiss flash messages
+setTimeout(() => {
+  document.querySelectorAll('.alert.fade.show').forEach(el => {
+    bootstrap.Alert.getOrCreateInstance(el).close();
+  });
+}, 4000);
+</script>
+{% endblock %}

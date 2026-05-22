@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}متابعة التاسكات{% endblock %} — Sky Lines</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  <style>
+    :root {
+      --sky-dark: #0d1b2a;
+      --sky-mid:  #1b2838;
+      --sky-blue: #1e88e5;
+      --sky-gold: #f5a623;
+    }
+    body { background: #f0f4f8; font-family: 'Segoe UI', Tahoma, sans-serif; }
+
+    /* Sidebar */
+    #sidebar {
+      width: 240px; min-height: 100vh; background: var(--sky-dark);
+      position: fixed; top: 0; right: 0; z-index: 100;
+      display: flex; flex-direction: column;
+    }
+    #sidebar .brand {
+      padding: 1.5rem 1rem 1rem;
+      border-bottom: 1px solid rgba(255,255,255,.1);
+    }
+    #sidebar .brand h5 { color: var(--sky-gold); margin: 0; font-weight: 700; font-size: 1rem; }
+    #sidebar .brand small { color: rgba(255,255,255,.5); font-size: .75rem; }
+    #sidebar .nav-link {
+      color: rgba(255,255,255,.7); padding: .65rem 1rem;
+      border-radius: 8px; margin: 2px 8px; font-size: .9rem;
+      transition: background .2s;
+    }
+    #sidebar .nav-link:hover, #sidebar .nav-link.active {
+      background: rgba(255,255,255,.1); color: #fff;
+    }
+    #sidebar .nav-link i { margin-left: .5rem; width: 20px; text-align: center; }
+    #sidebar .badge-nav {
+      float: left; font-size: .7rem;
+    }
+    #sidebar .user-box {
+      margin-top: auto; padding: 1rem;
+      border-top: 1px solid rgba(255,255,255,.1);
+    }
+    #sidebar .user-box .username { color: #fff; font-size: .85rem; font-weight: 600; }
+    #sidebar .user-box .role { color: rgba(255,255,255,.4); font-size: .75rem; }
+
+    /* Main content */
+    #main { margin-right: 240px; padding: 1.5rem; }
+
+    /* Cards */
+    .task-card {
+      border: none; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.08);
+      transition: transform .15s, box-shadow .15s;
+    }
+    .task-card:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.12); }
+    .task-card .card-header { border-radius: 12px 12px 0 0 !important; font-weight: 600; }
+    .task-card.border-danger { border-right: 4px solid #dc3545 !important; }
+    .task-card.border-warning { border-right: 4px solid #ffc107 !important; }
+    .task-card.border-primary { border-right: 4px solid #0d6efd !important; }
+    .task-card.border-success { border-right: 4px solid #198754 !important; }
+
+    /* Stat cards */
+    .stat-card { border-radius: 12px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    .stat-card .num { font-size: 2rem; font-weight: 700; }
+
+    /* Steps checklist */
+    .step-item { padding: .4rem .6rem; border-radius: 6px; margin-bottom: .3rem; }
+    .step-item.done { background: #e8f5e9; text-decoration: line-through; color: #666; }
+    .step-item:not(.done) { background: #fff3e0; }
+
+    /* Update feed */
+    .update-item { border-right: 3px solid var(--sky-blue); padding: .5rem .75rem; margin-bottom: .5rem; background: #f8f9fa; border-radius: 0 8px 8px 0; }
+    .update-item .ts { font-size: .75rem; color: #999; }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      #sidebar { width: 100%; min-height: auto; position: relative; }
+      #main { margin-right: 0; }
+    }
+
+    /* Flash */
+    .flash-container { position: fixed; top: 1rem; left: 1rem; z-index: 9999; min-width: 300px; }
+  </style>
+</head>
+<body>
+
+<!-- Flash messages -->
+<div class="flash-container">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for cat, msg in messages %}
+      <div class="alert alert-{{ cat }} alert-dismissible fade show shadow" role="alert">
+        {{ msg }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+    {% endfor %}
+  {% endwith %}
+</div>
+
+<div class="d-flex">
+  <!-- Sidebar -->
+  <nav id="sidebar">
+    <div class="brand">
+      <h5><i class="bi bi-building"></i> Sky Lines</h5>
+      <small>متابعة التاسكات</small>
+    </div>
+    <ul class="nav flex-column mt-2 px-1">
+      {% if user %}
+      <li class="nav-item">
+        <a class="nav-link {% if request.endpoint == 'tasks.dashboard' %}active{% endif %}"
+           href="{{ url_for('tasks.dashboard') }}">
+          <i class="bi bi-grid-3x3-gap"></i> لوحة التحكم
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link {% if request.endpoint == 'tasks.new_task' %}active{% endif %}"
+           href="{{ url_for('tasks.new_task') }}">
+          <i class="bi bi-plus-circle"></i> تاسك جديدة
+        </a>
+      </li>
+      {% if user.role == 'admin' %}
+      <li class="nav-item">
+        <a class="nav-link {% if request.endpoint == 'tasks.team' %}active{% endif %}"
+           href="{{ url_for('tasks.team') }}">
+          <i class="bi bi-people"></i> إدارة التيم
+        </a>
+      </li>
+      <li class="nav-item mt-1">
+        <a class="nav-link {% if request.args.get('status') == 'pending' %}active{% endif %}"
+           href="{{ url_for('tasks.dashboard', status='pending') }}">
+          <i class="bi bi-hourglass-split text-warning"></i> تنتظر موافقتك
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link {% if request.args.get('status') == 'overdue' %}active{% endif %}"
+           href="{{ url_for('tasks.dashboard', status='overdue') }}">
+          <i class="bi bi-alarm text-danger"></i> المتأخرة
+        </a>
+      </li>
+      <!-- Departments -->
+      <li class="nav-item mt-2">
+        <div class="px-3 py-1" style="font-size:.68rem;color:rgba(255,255,255,.3);text-transform:uppercase;letter-spacing:.06em">الأقسام</div>
+      </li>
+      {% set dept_icons = {'sales':'cart3','marketing':'megaphone','admin':'briefcase','operations':'gear','design':'palette','cs':'headset'} %}
+      {% for dk, dn in [('sales','المبيعات'),('marketing','التسويق'),('admin','الإداري'),('operations','العمليات'),('design','التصميم'),('cs','خدمة العملاء')] %}
+      <li class="nav-item">
+        <a class="nav-link {% if request.args.get('dept') == dk %}active{% endif %}"
+           href="{{ url_for('tasks.dashboard', dept=dk) }}" style="font-size:.85rem">
+          <i class="bi bi-{{ dept_icons.get(dk,'folder') }}"></i> {{ dn }}
+        </a>
+      </li>
+      {% endfor %}
+      {% endif %}
+      {% endif %}
+    </ul>
+
+    {% if user %}
+    <div class="user-box">
+      <div class="d-flex align-items-center gap-2">
+        <div class="rounded-circle bg-primary d-flex align-items-center justify-content-center"
+             style="width:36px;height:36px;flex-shrink:0">
+          <span class="text-white fw-bold" style="font-size:.9rem">{{ user.name[0] }}</span>
+        </div>
+        <div>
+          <div class="username">{{ user.name }}</div>
+          <div class="role">{{ 'مدير' if user.role == 'admin' else 'عضو تيم' }}</div>
+        </div>
+      </div>
+      <a href="{{ url_for('tasks.logout') }}" class="btn btn-outline-light btn-sm mt-3 w-100">
+        <i class="bi bi-box-arrow-right"></i> تسجيل خروج
+      </a>
+    </div>
+    {% endif %}
+  </nav>
+
+  <!-- Main -->
+  <main id="main" class="flex-grow-1">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
