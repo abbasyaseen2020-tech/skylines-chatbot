@@ -22,6 +22,7 @@ from flask import Flask, request, jsonify
 # CONFIGURATION
 # ============================================
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "skylines-tasks-secret-2026")
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -2502,6 +2503,13 @@ logger.info(f"Feed subscription result: {_sub}")
 _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
 _scheduler_thread.start()
 logger.info("⏰ Background scheduler started")
+
+# ── Task Tracker Blueprint ────────────────────────────────────────────────────
+from task_tracker import tasks_bp, start_overdue_checker
+app.register_blueprint(tasks_bp)
+start_overdue_checker()
+app.jinja_env.globals["now"] = datetime.now
+logger.info("📋 Task Tracker blueprint registered at /tasks")
 
 # Setup Ice Breakers on startup
 try:

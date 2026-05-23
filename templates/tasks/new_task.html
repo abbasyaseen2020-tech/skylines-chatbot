@@ -1,0 +1,152 @@
+{% extends "tasks/base.html" %}
+{% block title %}تاسك جديدة{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center gap-2 mb-4">
+  <a href="{{ url_for('tasks.dashboard') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-right"></i>
+  </a>
+  <h4 class="fw-bold mb-0">إضافة تاسك جديدة</h4>
+</div>
+
+<div class="card border-0 shadow-sm" style="max-width:780px">
+  <div class="card-body p-4">
+    <form method="post" id="taskForm">
+
+      <!-- Title -->
+      <div class="mb-3">
+        <label class="form-label fw-semibold">عنوان التاسك <span class="text-danger">*</span></label>
+        <input type="text" name="title" class="form-control form-control-lg"
+               placeholder="وصف مختصر للتاسك..." required maxlength="120">
+      </div>
+
+      <!-- Description -->
+      <div class="mb-3">
+        <label class="form-label fw-semibold">التفاصيل</label>
+        <textarea name="description" class="form-control" rows="3"
+                  placeholder="اشرح التاسك بالتفصيل..."></textarea>
+      </div>
+
+      <div class="row g-3 mb-3">
+        <!-- Category -->
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">التصنيف</label>
+          <select name="category" class="form-select">
+            <option value="عام">عام</option>
+            <option value="مبيعات">مبيعات</option>
+            <option value="تسويق">تسويق</option>
+            <option value="تصميم">تصميم</option>
+            <option value="إداري">إداري</option>
+            <option value="تطوير">تطوير</option>
+            <option value="خدمة عملاء">خدمة عملاء</option>
+          </select>
+        </div>
+
+        <!-- Priority -->
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">الأولوية</label>
+          <select name="priority" class="form-select">
+            <option value="high">🔴 عالية</option>
+            <option value="medium" selected>🟡 متوسطة</option>
+            <option value="low">🟢 منخفضة</option>
+          </select>
+        </div>
+
+        <!-- Estimated hours -->
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">الساعات المتوقعة</label>
+          <input type="number" name="estimated_hours" class="form-control"
+                 placeholder="e.g. 4" min="0.5" step="0.5">
+        </div>
+      </div>
+
+      <!-- Deadline -->
+      <div class="mb-4">
+        <label class="form-label fw-semibold">الموعد النهائي <span class="text-danger">*</span></label>
+        <input type="datetime-local" name="deadline" class="form-control" required>
+        <div class="form-text">المدير لن يوافق على تاسك بدون موعد</div>
+      </div>
+
+      <!-- Steps -->
+      <div class="mb-4">
+        <label class="form-label fw-semibold">خطوات التنفيذ</label>
+        <div id="stepsContainer">
+          <div class="input-group mb-2 step-row">
+            <span class="input-group-text bg-light text-muted">1</span>
+            <input type="text" name="steps[]" class="form-control" placeholder="الخطوة الأولى...">
+            <button type="button" class="btn btn-outline-danger remove-step" style="display:none">
+              <i class="bi bi-x"></i>
+            </button>
+          </div>
+        </div>
+        <button type="button" class="btn btn-outline-primary btn-sm" id="addStep">
+          <i class="bi bi-plus-circle"></i> إضافة خطوة
+        </button>
+      </div>
+
+      <!-- Notes -->
+      <div class="mb-4">
+        <label class="form-label fw-semibold">ملاحظات إضافية</label>
+        <textarea name="notes" class="form-control" rows="2"
+                  placeholder="أي معلومات إضافية للمدير..."></textarea>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary px-4">
+          <i class="bi bi-send me-1"></i> إرسال للمدير
+        </button>
+        <a href="{{ url_for('tasks.dashboard') }}" class="btn btn-outline-secondary">إلغاء</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let stepCount = 1;
+
+document.getElementById('addStep').addEventListener('click', () => {
+  stepCount++;
+  const container = document.getElementById('stepsContainer');
+  const row = document.createElement('div');
+  row.className = 'input-group mb-2 step-row';
+  row.innerHTML = `
+    <span class="input-group-text bg-light text-muted">${stepCount}</span>
+    <input type="text" name="steps[]" class="form-control" placeholder="الخطوة ${stepCount}...">
+    <button type="button" class="btn btn-outline-danger remove-step">
+      <i class="bi bi-x"></i>
+    </button>
+  `;
+  container.appendChild(row);
+  row.querySelector('.remove-step').addEventListener('click', () => {
+    row.remove();
+    renumberSteps();
+  });
+  updateRemoveButtons();
+});
+
+function renumberSteps() {
+  document.querySelectorAll('.step-row').forEach((row, i) => {
+    row.querySelector('.input-group-text').textContent = i + 1;
+  });
+  stepCount = document.querySelectorAll('.step-row').length;
+}
+
+function updateRemoveButtons() {
+  const rows = document.querySelectorAll('.step-row');
+  rows.forEach((row, i) => {
+    const btn = row.querySelector('.remove-step');
+    if (btn) btn.style.display = rows.length > 1 ? '' : 'none';
+  });
+}
+
+// Set min datetime to now
+const dl = document.querySelector('input[name="deadline"]');
+if (dl) {
+  const now = new Date();
+  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+  dl.min = now.toISOString().slice(0, 16);
+}
+</script>
+{% endblock %}
