@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Sky Lines - Team Task Tracker
+Sky Group Tasks - Team Task Tracker
 متابعة تاسكات التيم
 """
 
